@@ -278,7 +278,17 @@ def check_gpu() -> Check:
 
 def check_disk(data_dir: Path) -> Check:
     try:
-        target = data_dir if data_dir.exists() else data_dir.parent
+        # On a first launch the configured data directory may be several
+        # levels deep and none of its parents may have been created yet.
+        # Checking only data_dir.parent then reports "could not check" even
+        # though the drive is available. Walk up to the nearest existing
+        # ancestor so the preflight can still report the real free space.
+        target = Path(data_dir).expanduser()
+        while not target.exists() and target.parent != target:
+            target = target.parent
+        if not target.exists():
+            target = Path.cwd()
+
         free_gb = shutil.disk_usage(target).free / 1e9
         ok = free_gb >= MIN_FREE_GB
         return Check(
