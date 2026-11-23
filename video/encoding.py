@@ -35,7 +35,8 @@ _CANDIDATES: dict[str, list[str]] = {
     "videotoolbox": ["-c:v", "h264_videotoolbox", "-b:v", "8M", "-maxrate", "12M"],
 }
 
-_selected: tuple[str, list[str]] | None = None  # cached (name, args)
+_selected: tuple[str, list[str]] | None = None  # cached (selected encoder name, args)
+_selected_mode: str | None = None  # config mode used to produce the cached selection
 
 
 def _probe(args: list[str]) -> bool:
@@ -182,10 +183,15 @@ def sampled_frames(clip_path, every: int, width: int, height: int, hwaccel: bool
 
 def video_encoder_args(config: dict | None = None) -> list[str]:
     """The `-c:v ...` argument block for FFmpeg output encoding."""
-    global _selected
+    global _selected, _selected_mode
     mode = (config or {}).get("video", {}).get("encoder", "auto")
-    if _selected is None or (mode != "auto" and _selected[0] != mode):
+    # Cache by the requested mode, not the encoder selected from it. In
+    # particular, switching from explicit CPU back to auto must probe the
+    # available hardware again; the selected encoder name alone cannot tell
+    # whether the cached CPU choice came from auto fallback or user choice.
+    if _selected is None or mode != _selected_mode:
         _selected = _select(mode)
+        _selected_mode = mode
     return _selected[1]
 
 
