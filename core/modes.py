@@ -53,10 +53,11 @@ def is_vertical_live(config_or_opts: dict | None) -> bool:
 
 
 def is_square(config_or_opts: dict | None) -> bool:
-    """Square mode: a 1:1 centre crop inside a 9:16 canvas with black bars top
-    and bottom, captions still burned, no face tracking or layout. A toggle of
-    its own like Vertical Live, off unless asked for, and never combined with
-    Podcast, Gaming / Reaction, Vertical Live or Longform."""
+    """Square mode: the normal tracked Shorts pipeline with the crop asked for
+    at 1:1 instead of 9:16, centred on the canvas with black bars top and
+    bottom. Captions and branding still burn; the subject is still tracked.
+    A toggle of its own like Vertical Live, off unless asked for, and never
+    combined with Podcast, Gaming / Reaction, Vertical Live or Longform."""
     if not config_or_opts:
         return False
     if config_or_opts.get("square"):
@@ -172,9 +173,9 @@ def clean_gaming(settings: dict | None) -> dict:
 def needs_framing(config: dict) -> bool:
     """Whether a job's clips need framing decided (face tracking, TalkNet,
     layout). Only framing: importance analysis runs either way. Vertical Live
-    keeps its own frame and Square takes a fixed centre crop, so neither needs
-    the tracking models loaded."""
-    return not (is_vertical_live(config) or is_square(config))
+    keeps its own frame, so it alone skips the tracking models — Square uses
+    the same tracker as any other Shorts clip, just with a 1:1 crop."""
+    return not is_vertical_live(config)
 
 
 def measures_reaction(config: dict | None) -> bool:

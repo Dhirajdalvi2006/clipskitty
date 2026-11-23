@@ -274,7 +274,7 @@ export default function QueueItemSettings({
               setGaming(false)
             }
           },
-          'Cuts each clip to a square (1:1) frame centred on the 9:16 Shorts canvas, with black bars above and below. Captions still burn; no face tracking. Leave it off for the usual 9:16 Shorts.'
+          'Uses the same subject tracking and crop quality as a normal Shorts clip — only the crop shape changes to 1:1. The square picture is centred on the 9:16 canvas with black bars above and below; captions still burn. Leave it off for the usual 9:16 crop.'
         )}
         {toggle(
           'Podcast',

@@ -1485,22 +1485,24 @@ def _render_files(
     landscape = bool(opts.get("profile"))
     # Loudness: on unless this clip opted out (see settings/editor).
     normalize = bool(opts.get("normalize_audio", True))
-    # Podcast: opt-in, per video. Multi-cam footage is framed shot by shot, one
-    # steady crop on whoever is talking in each (see video/podcast.py). Read
-    # from the job config or a persisted per-clip flag.
-    # When false the tracking path below is entered exactly as before.
-    podcast = bool(opts.get("podcast") or config["clips"].get("podcast"))
+    from core import modes
+
     # Vertical Live (core/modes.py): the source is already a finished 9:16
     # composition. One encode of the whole frame at 1080x1920: no tracking,
     # no crop, no layout change. Read from the job config or the per-clip flag,
     # so editor re-renders keep it.
-    from core import modes
-
     vertical_live = not landscape and (modes.is_vertical_live(opts) or modes.is_vertical_live(config))
-    # Square (1:1 inside 9:16): centre-crop the source to 1:1 and pad to the
-    # Shorts canvas. No tracking or layout — captions still burn. Read from the
-    # job config or the per-clip flag, so editor re-renders keep it.
-    square = not landscape and (modes.is_square(opts) or modes.is_square(config))
+    # Square (1:1 inside 9:16): the SAME pipeline as any other Shorts clip —
+    # subject tracking, the same crop path, the same encoder — with the crop
+    # asked for at 1:1 instead of 9:16 and padded into the Shorts canvas with
+    # black bars. Read from the job config or the per-clip flag so editor
+    # re-renders keep it. Mutually exclusive with the layouts below.
+    square = not landscape and not vertical_live and (modes.is_square(opts) or modes.is_square(config))
+    # Podcast: opt-in, per video. Multi-cam footage is framed shot by shot, one
+    # steady crop on whoever is talking in each (see video/podcast.py). Read
+    # from the job config or a persisted per-clip flag.
+    # When false the tracking path below is entered exactly as before.
+    podcast = bool(not square and (opts.get("podcast") or config["clips"].get("podcast")))
     # A match (the Sports toggle, sports/): framed by the ball and the play.
     # From the job or the clip's saved options, so re-renders keep it.
     sport_name = modes.sport(opts) or modes.sport(config)
@@ -1515,7 +1517,7 @@ def _render_files(
     # on to the standard layout below. Off -> never imported.
     # A split turned off for this clip in the editor ("gaming": null) stays
     # off in a job that has it on (D33).
-    gaming = (not landscape and not vertical_live and not podcast
+    gaming = (not landscape and not vertical_live and not square and not podcast
               and (modes.is_gaming(opts)
                    or (modes.is_gaming(config) and not ("gaming" in opts and opts["gaming"] is None))))
     gaming_kept = None
@@ -1635,30 +1637,14 @@ def _render_files(
     # disk with them.
     scratch: list[Path] = []
     try:
-        # Square (1:1 inside 9:16): one plain centre crop + pad, no tracking,
-        # no TalkNet, no layout. Captions (if any) burn in the same pass.
-        if square:
-            intermediate = clip_dir / f"{stem}.source.mp4"
-            scratch.append(intermediate)
-            cut_clip(source, padded, intermediate)
-            if edit is not None:
-                # Manual edits (cuts/mutes/fades from the Shorts editor) land
-                # before the square crop, same as on the tracked path.
-                from video_editor.export import apply_edits
-
-                edited = clip_dir / f"{stem}.edited.mp4"
-                scratch.append(edited)
-                apply_edits(intermediate, edit, edited)
-                discard(intermediate)
-                intermediate = edited
-            _render_square(
-                intermediate, render_path, opts, ass_path, clip_dir,
-                normalize=normalize, vf_extra=vf_extra,
-            )
+        # Square goes through this SAME tracked branch as every other Shorts
+        # clip — cut, manual edits, sport framing, tracker, render_vertical.
+        # Only the crop's aspect (and the padding) differs, inside the cropper.
+        #
         # Vertical Live takes the single-encode branch below, like longform:
         # the tracked path (intermediate cut, face tracking, TalkNet, layout
         # decisions, frames through Python) is never entered.
-        elif config["clips"].get("vertical", True) and not landscape and not vertical_live:
+        if config["clips"].get("vertical", True) and not landscape and not vertical_live:
             # Cut a horizontal intermediate, track the subject, render 9:16.
             intermediate = clip_dir / f"{stem}.source.mp4"
             scratch.append(intermediate)
@@ -1741,6 +1727,10 @@ def _render_files(
                         # On unless set off (ARCHITECTURE.md §5, video/cuts.py).
                         shot_aware=cuts.shot_aware_on(tracking_cfg),
                         no_subject=tracking_cfg.get("shot_aware_no_subject", "center"),
+                        # The only Square difference: ask the tracker for a 1:1
+                        # window instead of 9:16, and never a 9:16 split layout.
+                        crop_aspect=1.0 if square else 9 / 16,
+                        allow_split=not square,
                     )
                     if crop_mode == "letterbox" and tracking["mode"] == "fit_blur":
                         # USER-forced letterbox means "show me the WHOLE frame" —
@@ -1753,7 +1743,7 @@ def _render_files(
                         tracking["path"] = [(t, x + shift) for t, x in tracking["path"]]
                 render_vertical(
                     intermediate, tracking, render_path, ass_path=ass_path, vf_extra=vf_extra,
-                    normalize=normalize,
+                    normalize=normalize, square=square,
                 )
         else:
             if edit is not None:
@@ -2075,60 +2065,4 @@ def _register_clip(
 
     print(f"      -> {final_path}  ({meta.title})")
     return RenderedClip(source_video_id=video_id, candidate=candidate, path=final_path)
-
-
-def _render_square(
-    intermediate: Path,
-    render_path: Path,
-    opts: dict,
-    ass_path: Path | None,
-    clip_dir: Path,
-    normalize: bool = True,
-    vf_extra: str = "",
-) -> None:
-    """Square (1:1 inside 9:16): one FFmpeg pass, no face tracking.
-
-      1. Centre-crop the source to 1:1 (keeps its aspect, never stretches)
-      2. Scale to 1080x1080
-      3. Pad to 1080x1920 with black bars top and bottom
-      4. Burn the word-synced captions, when the job has them.
-
-    The `subtitles` filter reads the ASS relative to the process cwd, so the
-    run uses the caption file's own directory."""
-    import subprocess
-
-    from core.binaries import ffmpeg
-    from video.encoding import audio_filter_args, final_movflags, video_encoder_args
-
-    vf = (
-        # Scale to COVER 1080x1080, then centre-crop to that exact frame (1:1,
-        # never stretched), then pad to the 9:16 Shorts canvas with black bars
-        # top and bottom. (Cover + centre crop == centre-crop to 1:1.)
-        "scale=1080:1080:force_original_aspect_ratio=increase:flags=lanczos,"
-        "crop=1080:1080:(iw-1080)/2:(ih-1080)/2,"
-        "pad=1080:1920:0:(1920-1080)/2:black"
-    )
-    if vf_extra:
-        vf += f",{vf_extra}"
-    workdir = None
-    if ass_path is not None and ass_path.exists():
-        vf += f",subtitles={ass_path.name}"
-        workdir = ass_path.parent
-
-    cmd = [
-        ffmpeg(), "-y",
-        "-i", str(intermediate.resolve()),
-        "-vf", vf,
-        *video_encoder_args(),
-        "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-b:a", "128k",
-        *audio_filter_args(normalize),
-        "-fps_mode", "cfr",
-        *final_movflags(),
-        "-shortest",
-        str(render_path.resolve()),
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True, cwd=workdir)
-    if result.returncode != 0:
-        raise RuntimeError(f"ffmpeg square render failed:\n{result.stderr[-2000:]}")
 

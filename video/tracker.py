@@ -852,6 +852,8 @@ def compute_tracking(
                                       # on unless the settings turn it off
     no_subject: str = "center",       # tracking.shot_aware_no_subject: a new shot nobody
                                       # is seen in opens on the centre, or "hold"s the old x
+    crop_aspect: float = 9 / 16,      # the crop's shape: 9/16 for Shorts, 1.0 for Square
+    allow_split: bool = True,         # Square never takes a 9:16 two-band split layout
     _cuts: ShotCuts | None = None,    # internal: the cut reader the wrapper below opens
 ) -> dict:
     if shot_aware and _cuts is None:
@@ -864,7 +866,8 @@ def compute_tracking(
                 dead_zone=dead_zone, max_pan_speed=max_pan_speed, min_confidence=min_confidence,
                 switch_margin=switch_margin, switch_seconds=switch_seconds,
                 fit_blur_fraction=fit_blur_fraction, force_fit_blur=force_fit_blur,
-                shot_aware=True, no_subject=no_subject,
+                shot_aware=True, no_subject=no_subject, crop_aspect=crop_aspect,
+                allow_split=allow_split,
                 _cuts=ShotCuts(cut_cap, fallback=_CUT_DIFF_SAMPLED),
             )
     with video_capture(clip_path) as cap:
@@ -1168,7 +1171,12 @@ def compute_tracking(
             else:
                 challenger_id = None
 
-            crop_frac = (h * 9 / 16) / w  # crop width as fraction of frame width
+            # Crop width as a fraction of the frame. Square asks for a 1:1
+            # window (width = height), so a wider crop is needed on landscape
+            # footage — the tracker then keeps the subject inside that window,
+            # exactly as it does for a 9:16 Shorts crop. Capped: no crop is
+            # wider than the source frame.
+            crop_frac = min(1.0, (h * crop_aspect) / w)
             raw_x = _target_x(
                 tracks, visible, active_id, crop_frac,
                 someone_talking=max_speak >= 0.004,
@@ -1359,7 +1367,7 @@ def compute_tracking(
             "region": (round(x0, 4), round(y0, 4), round(x1, 4), round(y1, 4)),
         }
 
-    layout = _detect_facecam_layout(tracks, active_id, n_samples)
+    layout = _detect_facecam_layout(tracks, active_id, n_samples) if allow_split else None
     if layout is not None:
         return layout
     if not path:

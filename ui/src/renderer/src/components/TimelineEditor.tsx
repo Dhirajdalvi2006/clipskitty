@@ -277,8 +277,8 @@ export default function TimelineEditor({
   // Vertical Live keeps the live's own 9:16 layout: there is no crop to
   // choose, so the Layout buttons would do nothing.
   const isVerticalLive = !!clip.render_opts?.vertical_live
-  // Square (1:1 inside 9:16): the centre crop is fixed, so there is no layout
-  // to choose here either.
+  // Square uses the same tracked crop as a normal Shorts clip, only at 1:1,
+  // so Auto / Letterbox / Center still apply. The 9:16 split layout does not.
   const isSquare = !!clip.render_opts?.square
   // Gaming / Reaction split (gaming/run.py): the webcam in one half, the game
   // or the video being reacted to in the other. null = not a split clip.
@@ -1104,11 +1104,9 @@ export default function TimelineEditor({
       ? 'landscape'
       : isVerticalLive
         ? 'vertical_live'
-        : isSquare
-          ? 'square'
-          : gaming
-            ? 'gaming'
-            : undefined
+        : gaming
+          ? 'gaming'
+          : undefined
   }
   const suggestionView = useMemo(
     () => suggestionCards(suggestions, { edit, layout }, uses, suggestionClip),
@@ -1973,10 +1971,7 @@ export default function TimelineEditor({
       {activeTab === 'motion' && !isLandscape && isVerticalLive && (
         <p className="text-xs text-muted">Layout: Vertical Live keeps the stream’s own 9:16 layout.</p>
       )}
-      {activeTab === 'motion' && !isLandscape && !isVerticalLive && isSquare && (
-        <p className="text-xs text-muted">Layout: Square keeps its 1:1 centre crop.</p>
-      )}
-      {activeTab === 'motion' && !isLandscape && !isVerticalLive && !isSquare && (
+      {activeTab === 'motion' && !isLandscape && !isVerticalLive && (
         <div className="flex items-center gap-2 text-xs flex-wrap">
           <span className="text-muted">Layout</span>
           {(
@@ -1984,11 +1979,13 @@ export default function TimelineEditor({
               ['track', 'Auto (AI)', 'The AI picks: subject tracking or letterbox as needed'],
               ['letterbox', 'Letterbox', 'Force the FULL frame on a blurred backdrop — use when the crop cuts someone off'],
               ['center', 'Center', 'Static center crop, no tracking'],
-              [
-                'split',
-                'Gaming / Reaction',
-                'A gaming or reaction layout: the streamer’s webcam with the game or the video they’re reacting to (Split, Half, Small facecam and more)'
-              ]
+              ...(isSquare
+                ? []
+                : [[
+                    'split',
+                    'Gaming / Reaction',
+                    'A gaming or reaction layout: the streamer’s webcam with the game or the video they’re reacting to (Split, Half, Small facecam and more)'
+                  ] as const])
             ] as const
           ).map(([value, label, tip]) => (
             <button

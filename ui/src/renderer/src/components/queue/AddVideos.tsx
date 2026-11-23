@@ -108,7 +108,7 @@ const TOGGLES: { key: ToggleKey; label: string; hint: string; title: string }[] 
     label: 'Square',
     hint: '(1:1 in 9:16)',
     title:
-      'Cuts the video to a square (1:1) frame and centres it on the 9:16 Shorts canvas, with black bars above and below. No face tracking or reframing — the whole frame is kept, cropped to a square. Captions still burn. Use it when the video is already framed for a square feed; leave it off for the usual 9:16 Shorts with subject tracking.'
+      'Uses the same subject tracking and crop quality as a normal Shorts clip — only the crop shape changes to 1:1. The square picture is centred on the 9:16 canvas with black bars above and below; captions still burn. Leave it off for the usual 9:16 crop.'
   },
   {
     key: 'podcast',

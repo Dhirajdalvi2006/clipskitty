@@ -69,9 +69,9 @@ clips:
                         # (turn on the 60s+ toggle for TikTok-length clips)
   vertical: true        # true 9:16 1080x1920 with YOLOv8 subject tracking
   captions: true        # burn word-synced captions into the clips
-  square: false         # 1:1 video centred inside the 9:16 Shorts canvas with
-                        # black bars top and bottom; no face tracking. Captions
-                        # still burn. Off = normal 9:16 reframing.
+  square: false         # the same tracked 9:16 pipeline with the crop asked
+                        # for at 1:1, centred on the canvas with black bars;
+                        # captions still burn. Off = normal 9:16 reframing.
   outro: false          # append the 2.9s Clips Kitty end card to each clip.
                         # Off by default; Settings > Branding turns it on.
                         # Stream-copied, so the clip is never re-encoded.

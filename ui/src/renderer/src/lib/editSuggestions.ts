@@ -86,9 +86,9 @@ export interface ClipContext {
    *  Take it back while the clip keeps it (the API refuses it too). */
   saved?: EditorState
   /** Why a suggested layout can't be used here: a Gaming / Reaction split,
-   *  a Vertical Live, a Square (1:1 in 9:16) clip, or a 16:9 clip. Absent when
-   *  the Layout buttons show. */
-  noLayout?: 'gaming' | 'vertical_live' | 'square' | 'landscape'
+   *  a Vertical Live, or a 16:9 clip. Absent when the Layout buttons show —
+   *  Square uses them too, its crop is just 1:1. */
+  noLayout?: 'gaming' | 'vertical_live' | 'landscape'
 }
 
 /** What one Use added to the editor's edit, in seconds of the clip: the
@@ -736,8 +736,6 @@ function noLayoutNote(ctx: ClipContext, tr: Words): string {
   if (ctx.noLayout === 'gaming') return tr('Not used on this clip: layout (a Gaming / Reaction clip keeps its split)')
   if (ctx.noLayout === 'vertical_live')
     return tr('Not used on this clip: layout (Vertical Live keeps the stream’s own 9:16 layout)')
-  if (ctx.noLayout === 'square')
-    return tr('Not used on this clip: layout (a Square clip keeps its 1:1 centre crop)')
   if (ctx.noLayout === 'landscape') return tr('Not used on this clip: layout (a 16:9 clip has no layout to choose)')
   return ''
 }

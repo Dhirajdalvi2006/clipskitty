@@ -470,7 +470,7 @@ export default function Watch({
                   key === 'vertical_live'
                     ? t('This channel streams vertically: keep each live’s own 9:16 layout, no face tracking. Videos with no vertical version are skipped.')
                     : key === 'square'
-                      ? t('Cuts each clip to a square (1:1) frame, centred on the 9:16 Shorts canvas with black bars above and below. Captions still burn; no face tracking.')
+                      ? t('Uses the same subject tracking and crop quality as a normal Shorts clip — only the crop shape changes to 1:1. The square picture is centred on the 9:16 canvas with black bars above and below; captions still burn.')
                       : key === 'gaming'
                       ? t('Game streams or reactions: the streamer’s webcam in the top half, the game or the video they’re reacting to in the bottom half.')
                       : key === 'sport'

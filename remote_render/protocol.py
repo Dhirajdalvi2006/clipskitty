@@ -66,8 +66,10 @@ def needs_framing(render_cfg: dict, render_opts: dict | None) -> bool:
 
     opts = render_opts or {}
     clips = render_cfg.get("clips")
-    if (opts.get("profile") or modes.is_vertical_live(opts) or modes.is_vertical_live(clips)
-            or modes.is_square(opts) or modes.is_square(clips)):
+    # Square still tracks the subject (its crop is just 1:1), so it needs the
+    # same framing-capable worker as any other Shorts clip. Only Vertical Live
+    # and longform keep the whole frame and skip tracking.
+    if opts.get("profile") or modes.is_vertical_live(opts) or modes.is_vertical_live(clips):
         return False
     return bool((render_cfg.get("clips") or {}).get("vertical", True))
 

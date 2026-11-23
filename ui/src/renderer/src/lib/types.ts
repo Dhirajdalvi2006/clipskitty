@@ -386,7 +386,7 @@ export interface RenderOpts {
   edit?: EditData | null
   profile?: string // longform rendering profile (16:9); absent = vertical Short
   vertical_live?: boolean // an already-composed 9:16 live: whole frame, no crop
-  square?: boolean // 1:1 centre crop inside the 9:16 canvas, black bars top/bottom
+  square?: boolean // tracked 1:1 crop inside the 9:16 canvas, black bars top/bottom
   /** Gaming / Reaction split (gaming/run.py). null turns it off for the clip. */
   gaming?: GamingSettings | null
   watermark?: WatermarkConfig | null
@@ -481,9 +481,9 @@ export interface JobOptions {
   /** An already-composed 9:16 live: keep its layout, skip face tracking
    *  (core/modes.py). Its own toggle; not combined with podcast or longform. */
   vertical_live?: boolean
-  /** Square: a 1:1 centre crop inside the 9:16 Shorts canvas with black bars
-   *  top and bottom. Captions burn, no face tracking. Not combined with the
-   *  other framing modes. */
+  /** Square: the normal tracked Shorts crop asked for at 1:1 instead of 9:16,
+   *  centred on the canvas with black bars top and bottom. Captions burn and
+   *  the subject is tracked as usual. Not combined with the other layouts. */
   square?: boolean
   /** Gaming / Reaction: the streamer's webcam over the game or the video being
    *  reacted to (gaming/). Not combined with vertical_live, podcast or longform. */

@@ -1,5 +1,10 @@
 """Vertical 9:16 rendering from a tracking result.
 
+Square mode (``square=True``) runs this SAME tracked path — same detector, same
+crop path, same encoder — and changes only the crop's shape: 1:1 instead of
+9:16. The 1:1 picture is centred on the 1080x1920 Shorts canvas with black
+bars above and below, so captions and branding stay in their usual places.
+
 Three modes (see video/tracker.py for how they're chosen):
 
   track    - OpenCV follows the smoothed crop path frame by frame, then FFmpeg
@@ -39,9 +44,6 @@ GAME_H = 1248  # gameplay band height (65%)
 # source) is composed frame by frame; within it, rounding is all it is, and
 # the clip renders exactly as a plain path does.
 ZOOM_SLACK_PX = 2
-# A widened crop scaled to 1080 wide at least this tall fills the screen
-# (trimmed to 1920); shorter, it sits over a blurred wash.
-FILL_MIN_H = 1916
 # The wash is remade every this many frames: it is a blur of the picture,
 # so half the frame rate is indistinguishable, and it is the costly part.
 WASH_EVERY = 2
@@ -55,30 +57,39 @@ def render_vertical(
     vf_extra: str = "",
     cam_position: str = "top",
     normalize: bool = True,
+    square: bool = False,
 ) -> Path:
     """vf_extra: an optional FFmpeg filter fragment (color preset) applied
     after scaling and before captions, so captions stay unfiltered.
     cam_position: 'top' | 'bottom' — which band the facecam occupies in the
     split (gameplay + webcam) layout. Ignored by the other modes.
+    square: render the tracked crop at 1:1, centred on the 9:16 canvas. The
+    tracking and cropping are otherwise identical to a normal Shorts clip.
 
     Every mode writes the clip itself (or what the end card is joined to),
     so each is written with final_movflags(): the first frame at 0 in every
     app."""
     if tracking["mode"] == "split":
-        return _render_split(
+        # The 2-band split is a 9:16 layout. Square jobs never ask for one (the
+        # tracker is told not to choose it), but fall back to the whole frame
+        # if an old saved decision has one.
+        return _render_fit_blur(
+            clip_path, None, output_path, ass_path, vf_extra,
+            normalize=normalize, square=square,
+        ) if square else _render_split(
             clip_path, tracking["webcam_box"], output_path, ass_path, vf_extra,
             cam_position=cam_position, normalize=normalize,
         )
     if tracking["mode"] == "fit_blur":
         return _render_fit_blur(
             clip_path, tracking.get("region"), output_path, ass_path, vf_extra,
-            normalize=normalize,
+            normalize=normalize, square=square,
         )
     return _render_tracked(
         clip_path, tracking["path"], output_path, ass_path, vf_extra,
         face_y=tracking.get("face_y"), normalize=normalize, rows=tracking.get("rows"),
         zoom=tracking.get("zoom"), band_top=tracking.get("band_top"),
-        band_bottom=tracking.get("band_bottom"),
+        band_bottom=tracking.get("band_bottom"), square=square,
     )
 
 
@@ -89,11 +100,15 @@ def _render_fit_blur(
     ass_path: Path | None,
     vf_extra: str = "",
     normalize: bool = True,
+    square: bool = False,
 ) -> Path:
     """The subject's bounding region (normalized x0,y0,x1,y1) shown at FULL
     output width on a heavily blurred backdrop — blurred bands land on the top
     and bottom only, never at the sides, and nobody is cropped out. Nothing is
     stretched: the region keeps its own aspect ratio. Pure FFmpeg.
+
+    With square=True the backdrop is 1080x1080 instead of 1080x1920 and the
+    finished square is centred on the Shorts canvas with black bars.
     """
     x0, y0, x1, y1 = (region or (0.0, 0.0, 1.0, 1.0))
     x0 = max(0.0, min(0.85, x0))
@@ -102,20 +117,28 @@ def _render_fit_blur(
     y1 = max(y0 + 0.15, min(1.0, y1))
     rw, rh, rx, ry = x1 - x0, y1 - y0, x0, y0
     crop_region = f"crop=iw*{rw:.4f}:ih*{rh:.4f}:iw*{rx:.4f}:ih*{ry:.4f}"
+    # Square keeps the same picture, just in a 1:1 window, then pads to 9:16.
+    pic_h = 1080 if square else 1920
+    small_h = pic_h // 8
 
-    # Background: the same crop, blown up to COVER 1080x1920, then destroyed:
+    # Background: the same crop, blown up to COVER the picture, then destroyed:
     # downscaled hard + blurred + upscaled = an unrecognizable color wash.
     bg = (
-        f"{crop_region},scale=1080:1920:force_original_aspect_ratio=increase,"
-        f"crop=1080:1920,scale=135:240,gblur=sigma=12,scale=1080:1920:flags=bilinear"
+        f"{crop_region},scale=1080:{pic_h}:force_original_aspect_ratio=increase,"
+        f"crop=1080:{pic_h},scale=135:{small_h},gblur=sigma=12,"
+        f"scale=1080:{pic_h}:flags=bilinear"
     )
     # Foreground: full width; height follows the region's own aspect ratio
-    # (capped at the screen so an unusually tall region can never overflow).
+    # (capped at the picture so an unusually tall region can never overflow).
     fg = (
-        f"{crop_region},scale=1080:-2:flags=lanczos,crop=w=1080:h=min(ih\\,1920)"
+        f"{crop_region},scale=1080:-2:flags=lanczos,crop=w=1080:h=min(ih\\,{pic_h})"
         + (f",{vf_extra}" if vf_extra else "")
     )
-    filters = f"[0:v]split=2[a][b];[a]{bg}[bg];[b]{fg}[fg];[bg][fg]overlay=0:(H-h)/2,setsar=1[v]"
+    pad = ",pad=1080:1920:0:(oh-ih)/2:black" if square else ""
+    filters = (
+        f"[0:v]split=2[a][b];[a]{bg}[bg];[b]{fg}[fg];"
+        f"[bg][fg]overlay=0:({pic_h}-h)/2,setsar=1{pad}[v]"
+    )
     if ass_path is not None:
         filters += f";[v]subtitles={ass_path.name}[v2]"
         vout = "[v2]"
@@ -156,11 +179,16 @@ def _render_tracked(
     zoom: list[tuple[float, float]] | None = None,
     band_top: float | None = None,
     band_bottom: float | None = None,
+    square: bool = False,
 ) -> Path:
-    """rows: the band of the frame's height the crop keeps, (top, bottom) in
+    """square: follow the SAME tracked path and crop the same way, but at a
+    1:1 aspect instead of 9:16; the finished crop is centred on 1080x1920
+    with black bars above and below. No layout, no face-safe 4:5 window.
+
+    rows: the band of the frame's height the crop keeps, (top, bottom) in
     fractions of it; all of it when None. A sport's framing leaves its TV
     scoreboard out this way (sports/basketball/action.py): the crop is then
-    that much shorter, and as much narrower, so it stays 9:16.
+    that much shorter, and as much narrower, so it keeps its aspect.
 
     zoom: (t, width) keys like the path's, the crop's width as a fraction of
     the source's. Where it is wider than 9:16 the crop keeps its full height,
@@ -188,35 +216,47 @@ def _render_tracked(
             y1 -= (y1 - y0) % 2  # even height required by H.264
         crop_h = y1 - y0
 
-        # Face in the top quarter of a full-height crop would sit under the
-        # TikTok/Instagram tab bar. For those clips, crop a WIDER 4:5 window
-        # instead: shown at full output width it's shorter than the screen, so it
-        # can start below the tab area — blurred bands land on top/bottom ONLY
-        # (never at the sides), and the wider view shows more of the scene.
-        top_safe = face_y is not None and face_y < 0.25
-        band_px = _even(band_top * 1920) if band_top and not top_safe and 0 < band_top < 0.5 else 0
-        bottom_px = _even(band_bottom * 1920) if band_bottom and not top_safe and 0 < band_bottom < 0.5 else 0
-        if band_px + bottom_px > 1920 * 0.6:      # never leave the picture under 40% of the screen
+        # Square keeps the tracker's decision and simply asks the crop to be
+        # 1:1. The 4:5 face-safe window and the app-bar blurred bands are 9:16
+        # layouts; neither applies to a square picture with black bars.
+        if square:
+            top_safe = False
             band_px = bottom_px = 0
-        banded = band_px or bottom_px
-        aspect = 4 / 5 if top_safe else 1080 / (1920 - band_px - bottom_px) if banded else 9 / 16
-        crop_w = int(crop_h * aspect)
-        crop_w -= crop_w % 2  # even width required by H.264
+            banded = False
+            aspect = 1.0
+        else:
+            # Face in the top quarter of a full-height crop would sit under the
+            # TikTok/Instagram tab bar. For those clips, crop a WIDER 4:5 window
+            # instead: shown at full output width it's shorter than the screen, so it
+            # can start below the tab area — blurred bands land on top/bottom ONLY
+            # (never at the sides), and the wider view shows more of the scene.
+            top_safe = face_y is not None and face_y < 0.25
+            band_px = _even(band_top * 1920) if band_top and not top_safe and 0 < band_top < 0.5 else 0
+            bottom_px = _even(band_bottom * 1920) if band_bottom and not top_safe and 0 < band_bottom < 0.5 else 0
+            if band_px + bottom_px > 1920 * 0.6:      # never leave the picture under 40% of the screen
+                band_px = bottom_px = 0
+            banded = band_px or bottom_px
+            aspect = 4 / 5 if top_safe else 1080 / (1920 - band_px - bottom_px) if banded else 9 / 16
+        requested_w = int(crop_h * aspect)
+        crop_w = requested_w - requested_w % 2  # even width required by H.264
         crop_w = min(crop_w, src_w)
-        if banded and crop_w < int(crop_h * aspect) - 2:
-            # A source too narrow for the picture between the bands (a 3:4 or
-            # 4:5 phone video): it is shown at its own shape, never squashed,
-            # by keeping the middle rows that fit, as a full crop trims them.
+        if (square or banded) and crop_w < requested_w - 2:
+            # A source too narrow for the crop (a 3:4 or 4:5 phone video, or a
+            # vertical upload asked for 1:1): keep the MIDDLE rows that fit.
+            # The picture is never squashed to make the aspect work.
             keep = _even(crop_w / aspect)
             y0 += (crop_h - keep) // 2
             y1 = y0 + keep
             crop_h = keep
 
+        # A zoom path behaves the same in Square: a wider crop keeps its full
+        # height over a blurred wash — only the wash is now 1080x1080, padded
+        # into the Shorts canvas like every other Square frame.
         composer = None
         if banded:
             composer = _ZoomComposer(src_w, crop_w, y0, y1, top=band_px, bottom=bottom_px)
         elif zoom and not top_safe and any(w * src_w > crop_w + ZOOM_SLACK_PX for _, w in zoom):
-            composer = _ZoomComposer(src_w, crop_w, y0, y1)
+            composer = _ZoomComposer(src_w, crop_w, y0, y1, out_size=(1080, 1080) if square else (1080, 1920))
 
         def produce(write) -> None:
             """Decode, follow the subject, and hand each cropped frame to ffmpeg.
@@ -280,11 +320,15 @@ def _render_tracked(
                 cap.set(cv2.CAP_PROP_POS_FRAMES, written)
                 emit_rest_on_cpu(written)
 
+        # The picture inside the Shorts canvas: 1080x1080 for Square, the
+        # whole 1080x1920 screen otherwise. A composer writes that size itself.
+        pic_w, pic_h = (1080, 1080) if square else (1080, 1920)
         # Input 0 is the raw cropped video on stdin; input 1 stays the original
         # clip, which is still where the audio comes from.
         pipe_in = [
             "-f", "rawvideo", "-pix_fmt", "bgr24",   # OpenCV hands us BGR
-            "-s", "1080x1920" if composer is not None else f"{crop_w}x{crop_h}", "-r", f"{fps}",
+            "-s", f"{pic_w}x{pic_h}" if composer is not None else f"{crop_w}x{crop_h}",
+            "-r", f"{fps}",
             "-i", "pipe:0",
         ]
 
@@ -326,10 +370,14 @@ def _render_tracked(
             _run_ffmpeg_piped(cmd, ass_path, produce)
             return output_path
 
-        # Uniform scale to 1080x1920 + color filter + captions + mux audio.
-        vf = "scale=1080:1920:flags=lanczos,setsar=1"
+        # Uniform scale + color filter + captions + mux audio. Square scales to
+        # 1080x1080, then pads to the Shorts canvas: the tracking decided what
+        # to show, the bars only place that 1:1 picture in the export frame.
+        vf = f"scale={pic_w}:{pic_h}:flags=lanczos,setsar=1"
         if composer is not None:
-            vf = "setsar=1"   # the composed frames are 1080x1920 already
+            vf = "setsar=1"   # the composer already wrote the picture size
+        if square:
+            vf += ",pad=1080:1920:0:(oh-ih)/2:black"
         if vf_extra:
             vf += f",{vf_extra}"
         if ass_path is not None:
@@ -382,14 +430,20 @@ def _even(v: float) -> int:
     return int(round(v / 2.0)) * 2
 
 
-def _middle_9x16(region):
-    """The middle of `region` at the screen's 9:16 shape (cover, not fit):
-    the sides trimmed if it is wider, the top and bottom if it is taller."""
+def _middle_cover(region, aspect: float):
+    """The middle of `region` at `aspect` (cover, not fit): the sides trimmed
+    if it is wider, the top and bottom if it is taller. 9/16 for a Shorts
+    screen, 1.0 for a Square picture."""
     h, w = region.shape[:2]
-    cw = max(1, min(w, int(round(h * 9 / 16))))
-    ch = max(1, min(h, int(round(w * 16 / 9))))
+    cw = max(1, min(w, int(round(h * aspect))))
+    ch = max(1, min(h, int(round(w / aspect))))
     x, y = (w - cw) // 2, (h - ch) // 2
     return region[y:y + ch, x:x + cw]
+
+
+def _middle_9x16(region):
+    """Kept for callers that name the screen shape explicitly."""
+    return _middle_cover(region, 9 / 16)
 
 
 def _resized(img, size: tuple[int, int]):
@@ -399,10 +453,10 @@ def _resized(img, size: tuple[int, int]):
     return cv2.resize(img, size, interpolation=cv2.INTER_AREA if shrink else cv2.INTER_CUBIC)
 
 
-def _wash(region):
+def _wash(region, size: tuple[int, int] = (1080, 1920)):
     """fit_blur's background, made in OpenCV: the region's middle covering
-    1080x1920, shrunk to 135x240, blurred (sigma 12) and blown back up, which
-    leaves only its colours.
+    `size`, shrunk to an eighth, blurred (sigma 12) and blown back up, which
+    leaves only its colours. Square passes (1080, 1080) and gets a square wash.
 
     Measured on 1080p broadcast frames, the cheap choices here change the
     wash by at most 4 levels of 255 and not its flicker: a plain bilinear
@@ -410,10 +464,13 @@ def _wash(region):
     would) and the same Gaussian as a separable filter, which OpenCV runs
     five times faster than GaussianBlur's 73-tap 8-bit path (0.8 ms against
     4.3)."""
-    small = cv2.resize(_middle_9x16(region), (135, 240), interpolation=cv2.INTER_LINEAR)
+    out_w, out_h = size
+    small = cv2.resize(_middle_cover(region, out_w / out_h),
+                       (max(1, out_w // 8), max(1, out_h // 8)),
+                       interpolation=cv2.INTER_LINEAR)
     kernel = _wash_kernel()
     small = cv2.sepFilter2D(small, -1, kernel, kernel)
-    return cv2.resize(small, (1080, 1920), interpolation=cv2.INTER_LINEAR)
+    return cv2.resize(small, (out_w, out_h), interpolation=cv2.INTER_LINEAR)
 
 
 @cache
@@ -438,12 +495,13 @@ class _ZoomComposer:
     """
 
     def __init__(self, src_w: int, base_w: int, y0: int, y1: int, top: int | None = None,
-                 bottom: int | None = None):
+                 bottom: int | None = None, out_size: tuple[int, int] = (1080, 1920)):
         self.src_w, self.base_w = src_w, base_w
         self.y0, self.y1 = y0, y1
         self.top = top or 0
         self.bottom = bottom or 0
         self.crop_h = y1 - y0
+        self.out_w, self.out_h = out_size
         self.wash = None
         self.wash_frame = 0
 
@@ -460,25 +518,28 @@ class _ZoomComposer:
         if self.top or self.bottom:
             stale = frame_idx - self.wash_frame
             if self.wash is None or not 0 <= stale < WASH_EVERY:
-                self.wash, self.wash_frame = _wash(region), frame_idx
-            end = 1920 - self.bottom
-            out = np.empty((1920, 1080, 3), np.uint8)
+                self.wash, self.wash_frame = _wash(region, (self.out_w, self.out_h)), frame_idx
+            end = self.out_h - self.bottom
+            out = np.empty((self.out_h, self.out_w, 3), np.uint8)
             out[:self.top] = self.wash[:self.top]
-            out[self.top:end] = _resized(region, (1080, end - self.top))
+            out[self.top:end] = _resized(region, (self.out_w, end - self.top))
             out[end:] = self.wash[end:]
             return memoryview(out).cast("B")
-        fh = _even(1080 * self.crop_h / cw)
-        if fh >= FILL_MIN_H:
-            # Tall enough to fill: trim the few rows or columns over 9:16
-            # rather than stretch, and scale straight to the screen.
-            return memoryview(_resized(_middle_9x16(region), (1080, 1920))).cast("B")
+        fh = _even(self.out_w * self.crop_h / cw)
+        if fh >= self.out_h - 4:
+            # Tall enough to fill: trim the few rows or columns over the
+            # picture's aspect rather than stretch, then scale straight to it.
+            return memoryview(_resized(
+                _middle_cover(region, self.out_w / self.out_h),
+                (self.out_w, self.out_h),
+            )).cast("B")
         stale = frame_idx - self.wash_frame
         if self.wash is None or not 0 <= stale < WASH_EVERY:
-            self.wash, self.wash_frame = _wash(region), frame_idx
-        top = (1920 - fh) // 2
-        out = np.empty((1920, 1080, 3), np.uint8)
+            self.wash, self.wash_frame = _wash(region, (self.out_w, self.out_h)), frame_idx
+        top = (self.out_h - fh) // 2
+        out = np.empty((self.out_h, self.out_w, 3), np.uint8)
         out[:top] = self.wash[:top]
-        out[top:top + fh] = _resized(region, (1080, fh))
+        out[top:top + fh] = _resized(region, (self.out_w, fh))
         out[top + fh:] = self.wash[top + fh:]
         return memoryview(out).cast("B")
 
