@@ -340,6 +340,25 @@ def test_disk_check_survives_a_missing_directory(tmp_path):
     assert check.name == "disk"
 
 
+def test_disk_check_walks_up_to_the_nearest_existing_ancestor(tmp_path, monkeypatch):
+    """A fresh nested data directory must still report the drive's free space."""
+    checked = []
+
+    class Usage:
+        free = 30_000_000_000
+
+    def fake_disk_usage(path):
+        checked.append(path)
+        return Usage()
+
+    monkeypatch.setattr(preflight.shutil, "disk_usage", fake_disk_usage)
+    check = preflight.check_disk(tmp_path / "not" / "created" / "yet")
+
+    assert checked == [tmp_path]
+    assert check.ok is True
+    assert check.detail == "30 GB free"
+
+
 def test_ready_ignores_non_blocking_failures():
     """No GPU and a full-ish disk should not stop someone clipping."""
     pf = preflight.Preflight(
