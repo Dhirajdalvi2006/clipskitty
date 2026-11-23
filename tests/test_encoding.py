@@ -75,3 +75,25 @@ def test_real_videotoolbox_probe_on_macos():
     # Run the real _probe with videotoolbox args
     success = _probe(_CANDIDATES["videotoolbox"])
     assert success is True, "Live _probe with h264_videotoolbox should succeed on macOS"
+
+
+def test_switching_from_cpu_back_to_auto_reselects_hardware(monkeypatch):
+    """An explicit CPU choice must not permanently poison later auto mode."""
+    import video.encoding as encoding
+
+    selected = ("nvenc", _CANDIDATES["nvenc"])
+    calls = []
+
+    def choose(mode):
+        calls.append(mode)
+        return selected
+
+    monkeypatch.setattr(encoding, "_selected", ("cpu", CPU_ARGS))
+    monkeypatch.setattr(encoding, "_selected_mode", "cpu")
+    monkeypatch.setattr(encoding, "_select", choose)
+
+    result = encoding.video_encoder_args({"video": {"encoder": "auto"}})
+
+    assert result == _CANDIDATES["nvenc"]
+    assert calls == ["auto"]
+    assert encoding.using_hardware_encoder() is True
