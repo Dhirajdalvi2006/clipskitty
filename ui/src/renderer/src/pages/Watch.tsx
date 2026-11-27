@@ -66,6 +66,8 @@ export default function Watch({
   const woop = useWoopAccounts()
   const [addMode, setAddMode] = useState<AddMode | null>(null)
   const [addPlatforms, setAddPlatforms] = useState<string[] | null>(null)
+  // Which named WoopSocial key posts this channel's clips.
+  const [addWoopAccountId, setAddWoopAccountId] = useState<string>(woop?.selectedAccountId ?? '')
   // The channel just added opens its whole setup.
   const [justAdded, setJustAdded] = useState<number | null>(null)
   // How its clips go out, chosen before Add like in the Publish dialog.
@@ -189,7 +191,8 @@ export default function Watch({
         .split(/[\s,]+/)
         .map((h) => h.replace(/^#/, '').trim())
         .filter(Boolean),
-      ai_hashtags: !addOnlyMine
+      ai_hashtags: !addOnlyMine,
+      woopsocial_account_id: addWoopAccountId
     },
     options: addClip
   })
@@ -422,6 +425,24 @@ export default function Watch({
           {mode !== 'off' && woop?.ready && (
             <div className="flex items-center gap-x-5 gap-y-2 flex-wrap text-sm">
               <span className="label">{t('Publish to')}</span>
+              {woop?.profiles.length && woop.profiles.length > 1 && (
+                <div className="flex items-center gap-2">
+                  <label className="text-xs shrink-0">{t('Publish as')}</label>
+                  <select
+                    className="input !py-1 text-xs !w-64"
+                    value={addWoopAccountId}
+                    onChange={(e) => setAddWoopAccountId(e.target.value)}
+                    aria-label={t('Which named WoopSocial key posts this channel')}
+                  >
+                    <option value="">{t('Default key (Settings)')}</option>
+                    {woop.profiles.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name}{p.has_key ? ` (····${p.key_tail})` : ` ${t('no key yet')}`}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
               {connected.length === 0 ? (
                 <span className="text-muted">
                   {t('No accounts are connected to WoopSocial yet. Connect them in Settings.')}

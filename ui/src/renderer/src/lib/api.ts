@@ -46,7 +46,7 @@ import type {
   YouTubeSettings,
   YouTubeStatus
 } from './youtube'
-import type { Capabilities, FanOut, PlatformRow, UploadPostStatus } from './uploadpost'
+import type { Capabilities, FanOut, PlatformRow, UploadPostStatus, WoopProfile } from './uploadpost'
 import type { RemoteRenderState } from './remoteRender'
 
 export const API_BASE = 'http://127.0.0.1:8765'
@@ -838,6 +838,37 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ platform })
     }),
+  /** The named API-key profiles and which one Settings manages. No key
+   *  material is ever returned. */
+  woopSocialAccounts: () =>
+    request<{ accounts: WoopProfile[]; selected_account_id: string }>('/woopsocial/accounts'),
+  woopSocialAddAccount: (body: { name: string; api_key?: string }) =>
+    request<{ account: WoopProfile; projects: number }>('/woopsocial/accounts', {
+      method: 'POST',
+      body: JSON.stringify(body)
+    }),
+  woopSocialRenameAccount: (accountId: string, name: string) =>
+    request<WoopProfile>(`/woopsocial/accounts/${encodeURIComponent(accountId)}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ name })
+    }),
+  woopSocialRemoveAccount: (accountId: string) =>
+    request<UploadPostStatus>(`/woopsocial/accounts/${encodeURIComponent(accountId)}`, {
+      method: 'DELETE'
+    }),
+  woopSocialSelectAccount: (accountId: string) =>
+    request<UploadPostStatus>(`/woopsocial/accounts/${encodeURIComponent(accountId)}/select`, {
+      method: 'POST'
+    }),
+  woopSocialPutNamedKey: (accountId: string, apiKey: string) =>
+    request<UploadPostStatus & { projects: number }>(`/woopsocial/accounts/${encodeURIComponent(accountId)}/key`, {
+      method: 'PUT',
+      body: JSON.stringify({ api_key: apiKey })
+    }),
+  woopSocialDeleteNamedKey: (accountId: string) =>
+    request<{ removed: boolean } & UploadPostStatus>(`/woopsocial/accounts/${encodeURIComponent(accountId)}/key`, {
+      method: 'DELETE'
+    }),
   woopSocialPublish: (
     clipId: number,
     body: {
@@ -848,6 +879,10 @@ export const api = {
       tags?: string[]
       overrides?: Record<string, Record<string, string>>
       scheduled_date?: string
+      /** Which named key sends this clip. Empty means the Settings default. */
+      account_id?: string
+      /** Optional connected social account ids inside that key's project. */
+      social_account_ids?: string[]
     }
   ) =>
     request<FanOut>(`/woopsocial/clips/${clipId}/publish`, {
@@ -874,6 +909,10 @@ export const api = {
     exclude?: Record<string, string[]>
     /** Added to every clip in the run, on top of each clip's own. */
     hashtags?: string[]
+    /** Which named key sends this run. Empty means the Settings default. */
+    account_id?: string
+    /** Optional connected social account ids inside that key's project. */
+    social_account_ids?: string[]
   }) =>
     request<{
       started: { clip_id: number; request_id: string; scheduled_for: string }[]

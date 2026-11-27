@@ -189,6 +189,9 @@ def record_refresh(db, clip_id: int, result, *, known=None) -> int:
     outcomes = result.outcomes if known is None else posts.news(known, result)
     for outcome in outcomes:
         db.record_clip_publish(clip_id, outcome.platform, {
+            # The provider is part of the row's identity now: without it a
+            # refresh would create a blank-provider row beside the real one.
+            "provider": "upload_post",
             "state": outcome.state,
             "post_id": outcome.post_id,
             "post_url": outcome.post_url,
@@ -216,12 +219,14 @@ def record_retry(db, clip_id: int, result, rows) -> int:
     if not result.outcomes:
         for platform in sorted(failed):
             db.record_clip_publish(
-                clip_id, platform, {"state": "queued", "error": "", "created_at": sent}
+                clip_id, platform, {"provider": "upload_post", "state": "queued",
+                                    "error": "", "created_at": sent}
             )
         return len(failed)
     outcomes = posts.news(rows, result)
     for outcome in outcomes:
         fields = {
+            "provider": "upload_post",
             "state": outcome.state,
             "post_id": outcome.post_id,
             "post_url": outcome.post_url,

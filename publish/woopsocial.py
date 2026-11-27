@@ -492,7 +492,15 @@ class WoopSocialPublisher:
         scheduled_for: str = "",
         overrides: dict[str, dict] | None = None,
         on_media: Callable[[str], None] | None = None,
+        social_account_ids: list[str] | None = None,
     ) -> FanOutResult:
+        """Send one clip, optionally to particular connected social accounts.
+
+        `social_account_ids` is the WoopSocial account id, not the local name
+        of an API key: one project can have two YouTube channels, and a person
+        may mean only one of them. With none, the old platform-only choice
+        stands and every matching connected account is used.
+        """
         if not self.project_id:
             raise NotConnected(
                 "No WoopSocial project is set up yet. Open Manage Social Accounts "
@@ -502,10 +510,33 @@ class WoopSocialPublisher:
         if not wanted:
             raise WoopSocialError("Pick at least one platform WoopSocial can post to.")
 
+        all_accounts = self.client.social_accounts(self.project_id)
+        chosen_ids: set[str] = set()
+        if social_account_ids:
+            available = {str(a.get("id") or ""): a for a in all_accounts}
+            for value in social_account_ids:
+                account_id = str(value or "").strip()
+                if not _ID_SHAPE.fullmatch(account_id):
+                    raise WoopSocialError("That is not a WoopSocial social account.")
+                account = available.get(account_id)
+                if account is None:
+                    raise NotConnected(
+                        "One of the chosen WoopSocial accounts is not connected to "
+                        "this key any more. Check it in Settings."
+                    )
+                platform = FROM_PLATFORM.get(str(account.get("platform") or "").upper())
+                if platform not in wanted:
+                    raise WoopSocialError(
+                        f"A chosen account is for {platform or 'another platform'}, "
+                        "which was not selected for this post."
+                    )
+                chosen_ids.add(account_id)
+
         accounts = [
             a
-            for a in self.client.social_accounts(self.project_id)
+            for a in all_accounts
             if FROM_PLATFORM.get(str(a.get("platform") or "").upper()) in wanted
+            and (not chosen_ids or str(a.get("id") or "") in chosen_ids)
         ]
         if not accounts:
             raise NotConnected(

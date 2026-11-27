@@ -19,6 +19,20 @@ export type UploadPostStatus = {
    *  affiliate claim is shown anywhere — just a plain signup link. */
   affiliate_url: string
   storage: string
+  /** WoopSocial only: the named API-key profiles, never the key material. */
+  accounts?: WoopProfile[]
+  /** WoopSocial only: which named key the Settings card manages. */
+  selected_account_id?: string
+}
+
+/** One named WoopSocial API key. Never the key itself. */
+export type WoopProfile = {
+  id: string
+  name: string
+  project_id: string
+  has_key: boolean
+  key_tail: string
+  platforms: string[]
 }
 
 /** sending | queued | processing | published | failed | skipped. 'sending' is

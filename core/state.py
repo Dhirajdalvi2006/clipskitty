@@ -242,12 +242,18 @@ CREATE TABLE IF NOT EXISTS publish_jobs (
 -- history, rather than migrated — the two paths keep their own records and
 -- neither can corrupt the other.
 --
--- Keyed the same way clip_translations is, for the same reason: one clip, N
--- targets, each with its own state and its own error.
+-- Keyed by clip, platform, provider and publishing account: one clip can go to
+-- YouTube through two different WoopSocial keys, and those are two posts with
+-- two independent states and links. The original (clip_id, platform) key made
+-- the second silently overwrite the first.
 CREATE TABLE IF NOT EXISTS clip_publishes (
     clip_id    INTEGER NOT NULL,
     platform   TEXT NOT NULL,               -- youtube | tiktok | instagram | ...
     provider   TEXT NOT NULL DEFAULT '',    -- which publisher delivered it
+    -- The named WoopSocial key/profile that made the post. '' means an older
+    -- row (or a provider with no accounts), so existing history still reads.
+    account_id    TEXT NOT NULL DEFAULT '',
+    account_name  TEXT NOT NULL DEFAULT '',
     -- Identity that outlives a re-render, matching uploads: applying edits
     -- gives the clip a new id, so clip_id alone cannot find this row again.
     video_id   TEXT NOT NULL DEFAULT '',
@@ -268,7 +274,7 @@ CREATE TABLE IF NOT EXISTS clip_publishes (
     scheduled_for TEXT NOT NULL DEFAULT '',
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    PRIMARY KEY (clip_id, platform)
+    PRIMARY KEY (clip_id, platform, provider, account_id)
 );
 
 -- Small key/value store for app-level flags that must outlive a restart.
@@ -695,6 +701,53 @@ class StateDB:
                 self.conn.execute(
                     f"ALTER TABLE clip_publishes ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"
                 )
+        # SQLite cannot change a primary key in place. Rebuild once so a clip
+        # posted through two named WoopSocial keys gets two rows instead of one
+        # overwriting the other. Old rows keep their history with blank account
+        # fields; nothing is dropped or guessed.
+        publish_info = list(self.conn.execute("PRAGMA table_info(clip_publishes)"))
+        publish_cols = {r["name"] for r in publish_info}
+        key_cols = [r["name"] for r in publish_info if r["pk"]]
+        if key_cols != ["clip_id", "platform", "provider", "account_id"]:
+            self.conn.executescript(
+                """
+                CREATE TABLE clip_publishes_new (
+                    clip_id    INTEGER NOT NULL,
+                    platform   TEXT NOT NULL,
+                    provider   TEXT NOT NULL DEFAULT '',
+                    account_id TEXT NOT NULL DEFAULT '',
+                    account_name TEXT NOT NULL DEFAULT '',
+                    video_id   TEXT NOT NULL DEFAULT '',
+                    start_s    REAL NOT NULL DEFAULT 0,
+                    end_s      REAL NOT NULL DEFAULT 0,
+                    state      TEXT NOT NULL DEFAULT 'queued',
+                    post_id    TEXT NOT NULL DEFAULT '',
+                    post_url   TEXT NOT NULL DEFAULT '',
+                    error      TEXT NOT NULL DEFAULT '',
+                    request_id TEXT NOT NULL DEFAULT '',
+                    scheduled_for TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    media_id   TEXT NOT NULL DEFAULT '',
+                    caption    TEXT NOT NULL DEFAULT '',
+                    visibility TEXT NOT NULL DEFAULT '',
+                    PRIMARY KEY (clip_id, platform, provider, account_id)
+                );
+                INSERT INTO clip_publishes_new (
+                    clip_id, platform, provider, account_id, account_name,
+                    video_id, start_s, end_s, state, post_id, post_url, error,
+                    request_id, scheduled_for, created_at, updated_at, media_id,
+                    caption, visibility
+                )
+                SELECT clip_id, platform, provider, '', '',
+                    video_id, start_s, end_s, state, post_id, post_url, error,
+                    request_id, scheduled_for, created_at, updated_at, media_id,
+                    caption, visibility
+                FROM clip_publishes;
+                DROP TABLE clip_publishes;
+                ALTER TABLE clip_publishes_new RENAME TO clip_publishes;
+                """
+            )
         creator_cols = {r["name"] for r in self.conn.execute("PRAGMA table_info(creators)")}
         if "default_branding_id" not in creator_cols:
             self.conn.execute("ALTER TABLE creators ADD COLUMN default_branding_id INTEGER")
@@ -1399,6 +1452,11 @@ class StateDB:
         invent one. Called once per platform per fan-out, and again on every
         status poll as a platform moves queued -> processing -> published.
 
+        A row is one clip, one platform, one provider and one named publishing
+        account. The first two of those are the arguments; the other two come
+        from `fields`. Status writers must pass them too, or a refresh would
+        land on a different row from the send it is describing.
+
         created_at marks when the clip was last sent to this platform. A
         status poll leaves it alone. A write that sends the clip again passes
         `created_at` (the publish-time writers do), so a post's waiting windows
@@ -1410,6 +1468,11 @@ class StateDB:
             k: v for k, v in fields.items()
             if k in allowed and k not in ("clip_id", "platform", "created_at")
         }
+        # The conflict key has to be explicit: an omitted provider or account
+        # would otherwise become '' and create a second row beside the one the
+        # send wrote.
+        for key in ("provider", "account_id", "account_name"):
+            row.setdefault(key, "")
         row["updated_at"] = _now()
         sent = str(fields.get("created_at") or "")
 
@@ -1420,22 +1483,42 @@ class StateDB:
             updates.append("created_at = excluded.created_at")
         self.conn.execute(
             f"INSERT INTO clip_publishes ({columns}) VALUES ({placeholders}) "
-            f"ON CONFLICT(clip_id, platform) DO UPDATE SET {', '.join(updates)}",
+            f"ON CONFLICT(clip_id, platform, provider, account_id) DO UPDATE SET "
+            f"{', '.join(updates)}",
             (clip_id, platform, sent or _now(), *row.values()),
         )
         self.conn.commit()
 
-    def clip_publishes(self, clip_id: int) -> list[sqlite3.Row]:
+    def clip_publishes(self, clip_id: int, *, account_id: str | None = None) -> list[sqlite3.Row]:
+        if account_id is None:
+            return self.conn.execute(
+                "SELECT * FROM clip_publishes WHERE clip_id = ? ORDER BY account_id, platform",
+                (clip_id,),
+            ).fetchall()
         return self.conn.execute(
-            "SELECT * FROM clip_publishes WHERE clip_id = ? ORDER BY platform",
-            (clip_id,),
+            "SELECT * FROM clip_publishes WHERE clip_id = ? AND account_id = ? ORDER BY platform",
+            (clip_id, account_id),
         ).fetchall()
 
-    def publishes_for_request(self, request_id: str) -> list[sqlite3.Row]:
-        """Every destination from one fan-out, so a retry can find its group."""
+    def publishes_for_request(
+        self, request_id: str, account_id: str | None = None
+    ) -> list[sqlite3.Row]:
+        """Every destination from one fan-out, so a retry can find its group.
+
+        With `account_id`, only that named publishing account's rows: two
+        WoopSocial keys may happen to use the same request id, and a status
+        check must change the post its own key sent. None means all accounts,
+        including the blank account on rows written before names existed.
+        """
+        if account_id is None:
+            return self.conn.execute(
+                "SELECT * FROM clip_publishes WHERE request_id = ? ORDER BY platform",
+                (request_id,),
+            ).fetchall()
         return self.conn.execute(
-            "SELECT * FROM clip_publishes WHERE request_id = ? ORDER BY platform",
-            (request_id,),
+            "SELECT * FROM clip_publishes WHERE request_id = ? AND account_id = ? "
+            "ORDER BY platform",
+            (request_id, account_id),
         ).fetchall()
 
     def recent_clip_publishes(self, limit: int = 50) -> list[sqlite3.Row]:

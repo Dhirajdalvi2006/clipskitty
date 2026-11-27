@@ -141,7 +141,7 @@ class PublishWorker(threading.Thread):
         try:
             from server import woopsocial_service as woop
 
-            if not woop.is_enabled(db) or not woop.has_key(self.data_dir):
+            if not woop.is_enabled(db):
                 return
             # First, anything a stop in mid-send left unsettled, so it is either
             # followed like any other post or safe to send again. Contained on
@@ -155,14 +155,40 @@ class PublishWorker(threading.Thread):
                     )
             except Exception as e:
                 print(f"  Could not settle interrupted sends: {e}")
-            if not woop.in_flight(db):
-                return
-            out = woop.refresh_in_flight(db, self.data_dir)
-            if out.get("updated"):
-                print(
-                    f"  Publish status: {out['updated']} updated, "
-                    f"{out['still_waiting']} still waiting."
-                )
+            # The default / legacy key: one pass, exactly as before, so
+            # one-argument test doubles keep working. The same request id can be
+            # reused by two keys, so each key asks only about the posts it sent.
+            if woop.in_flight(db):
+                out = woop.refresh_in_flight(db, self.data_dir)
+                if out.get("updated"):
+                    print(
+                        f"  Publish status: {out['updated']} updated, "
+                        f"{out['still_waiting']} still waiting."
+                    )
+            # Each named key gets its own pass with its own key. Guarded so a
+            # minimal test double or a missing accounts flag never stops it.
+            try:
+                named = [p["id"] for p in woop.profiles(db)
+                         if p["id"] != woop.DEFAULT_ACCOUNT_ID]
+            except Exception:
+                named = []
+            for account_id in named:
+                if not woop.has_key_for(self.data_dir, account_id):
+                    continue
+                if not woop.in_flight(db, account_id=account_id):
+                    continue
+                try:
+                    out = woop.refresh_in_flight(
+                        db, self.data_dir, account_id=account_id
+                    )
+                except Exception as e:
+                    print(f"  Could not check publish status ({account_id}): {e}")
+                    continue
+                if out.get("updated"):
+                    print(
+                        f"  Publish status ({account_id}): {out['updated']} updated, "
+                        f"{out['still_waiting']} still waiting."
+                    )
         except Exception as e:
             print(f"  Could not check publish status: {e}")
 
@@ -212,11 +238,37 @@ class PublishWorker(threading.Thread):
                              ("Upload-Post", "uploadpost_service")):
             try:
                 provider = importlib.import_module(f"server.{module}")
-                if not provider.is_enabled(db) or not provider.has_key(self.data_dir):
+                if not provider.is_enabled(db):
                     continue
-                out = provider.refresh_missing_urls(db, self.data_dir, now=now)
-                if out.get("updated"):
-                    print(f"  {name} links: {out['updated']} post(s) updated.")
+                if module == "woopsocial_service":
+                    # The default / legacy key: the original single call, no
+                    # account argument, so one-argument test doubles keep working.
+                    out = provider.refresh_missing_urls(db, self.data_dir, now=now)
+                    if out.get("updated"):
+                        print(f"  {name} links: {out['updated']} post(s) updated.")
+                    # Each named key asks only about its own posts; two keys can
+                    # reuse a request id, so they must not share a pass.
+                    try:
+                        named = [p["id"] for p in provider.refresh_account_ids(db)
+                                 if p["id"] != provider.DEFAULT_ACCOUNT_ID]
+                    except Exception:
+                        named = []
+                    for account_id in named:
+                        if not provider.has_key_for(self.data_dir, account_id):
+                            continue
+                        try:
+                            out = provider.refresh_missing_urls(
+                                db, self.data_dir, now=now, account_id=account_id
+                            )
+                        except Exception as e:
+                            print(f"  Could not check {name} links ({account_id}): {e}")
+                            continue
+                        if out.get("updated"):
+                            print(f"  {name} links ({account_id}): {out['updated']} post(s) updated.")
+                else:
+                    out = provider.refresh_missing_urls(db, self.data_dir, now=now)
+                    if out.get("updated"):
+                        print(f"  {name} links: {out['updated']} post(s) updated.")
             except Exception as e:
                 print(f"  Could not check {name} links: {e}")
 

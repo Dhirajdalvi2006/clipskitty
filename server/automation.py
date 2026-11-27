@@ -116,6 +116,9 @@ class PublishSettings(BaseModel):
     # pinterest.pinterestBoardId.
     overrides: dict = {}
     discord_destination_id: int | None = Field(default=None, ge=1)
+    # Which named WoopSocial API key posts this channel's clips. Empty keeps
+    # the original single key, so watches saved before names existed still run.
+    woopsocial_account_id: str = ""
 
 
 class AutomationPatch(BaseModel):
@@ -1017,8 +1020,13 @@ class ChannelWatcher(threading.Thread):
         keep = {} if chosen is not None else {"chosen_clips": json.dumps([list(_window(c)) for c in picked])}
         d.set_watch_item(item["id"], publish_state="publishing", publish_error="", **keep)
         where = ", ".join(_label(p) for p in settings.platforms)
+        account = ""
+        if settings.woopsocial_account_id:
+            from server import woopsocial_service as woop
+
+            account = f" through {woop.get_profile(d, settings.woopsocial_account_id)['name']}"
         try:
-            with self._busy(f"Sending clips of {_quoted(item['title'])} to {where}"):
+            with self._busy(f"Sending clips of {_quoted(item['title'])} to {where}{account}"):
                 out = self._publish_now(d, item, watch, settings, clip_ids)
         except Exception as e:
             return self._publish_failed(d, item, settings, e)
@@ -1056,6 +1064,7 @@ class ChannelWatcher(threading.Thread):
             day_start=settings.day_start if settings.spread else "",
             overrides=dict(settings.overrides),
             footer=render_footer(settings.footer, item, watch),
+            account_id=settings.woopsocial_account_id,
         )
 
     def _publish_failed(self, d: StateDB, item, settings, e: Exception) -> dict:

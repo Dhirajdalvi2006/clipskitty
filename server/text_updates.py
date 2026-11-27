@@ -291,7 +291,7 @@ class TextUpdates:
             publish = json.loads(watch['publish']) if watch else {}
         except (ValueError, TypeError):
             publish = {}
-        detail = {**dict(item), 'platforms': publish.get('platforms') or [], 'first_slot': '', 'thumbnail_url': ''}
+        detail = {**dict(item), 'platforms': publish.get('platforms') or [], 'account_id': publish.get('woopsocial_account_id') or '', 'first_slot': '', 'thumbnail_url': ''}
         clips = d.clips_for_video(item['video_id'])
         if clips:
             detail['thumbnail_url'] = f"/clips/{clips[0]['id']}/source-frame"

@@ -8,14 +8,16 @@ import type { ClipUpdatesStatus, PendingApproval } from '../lib/textUpdates'
 import { useEvents } from '../lib/useEvents'
 import { notifyApproval } from '../lib/queueNotifications'
 import { woopTargetLabel, type WoopAccount } from '../lib/woopTargets'
+import type { WoopProfile } from '../lib/uploadpost'
 
-const Context = createContext<{status: ClipUpdatesStatus | null; pending: PendingApproval[]; accounts: WoopAccount[]; refresh: () => Promise<void>}>({status:null,pending:[],accounts:[],refresh:async()=>{}})
+const Context = createContext<{status: ClipUpdatesStatus | null; pending: PendingApproval[]; accounts: WoopAccount[]; profiles: WoopProfile[]; refresh: () => Promise<void>}>({status:null,pending:[],accounts:[],profiles:[],refresh:async()=>{}})
 export const useClipUpdates = () => useContext(Context)
 
 export function ClipUpdatesProvider({children}: {children: ReactNode}): JSX.Element {
   const [status, setStatus] = useState<ClipUpdatesStatus | null>(null)
   const [pending, setPending] = useState<PendingApproval[]>([])
   const [accounts, setAccounts] = useState<WoopAccount[]>([])
+  const [profiles, setProfiles] = useState<WoopProfile[]>([])
   const refreshVersion = useRef(0)
   const seen = useRef(new Set<number>())
   const refresh = useCallback(async (): Promise<void> => {
@@ -24,6 +26,12 @@ export function ClipUpdatesProvider({children}: {children: ReactNode}): JSX.Elem
       const [next, items] = await Promise.all([textUpdates.status(), textUpdates.pending()])
       setStatus(next)
       setPending(Array.isArray(items) ? items : [])
+      // Named profiles resolve a watch's account_id to a name in approval cards.
+      void api.woopSocialAccounts().then(got => {
+        if (version === refreshVersion.current) setProfiles(got.accounts ?? [])
+      }).catch(() => {
+        if (version === refreshVersion.current) setProfiles([])
+      })
       if (Array.isArray(items) && items.length) {
         void api.woopSocialConnections().then(got => {
           if (version === refreshVersion.current) setAccounts(got.accounts ?? [])
@@ -45,7 +53,7 @@ export function ClipUpdatesProvider({children}: {children: ReactNode}): JSX.Elem
     return () => clearInterval(timer)
   }, [refresh])
   useEvents(event => { if (event.type === 'automation') void refresh() })
-  return <Context.Provider value={{status,pending,accounts,refresh}}>{children}</Context.Provider>
+  return <Context.Provider value={{status,pending,accounts,profiles,refresh}}>{children}</Context.Provider>
 }
 
 export function ApprovalActions({itemId, showDMCA, onChanged, disabled = false}: {
@@ -101,7 +109,7 @@ function AttorneyPopup({message, onClose}: {message: string; onClose: () => void
 }
 
 function ApprovalCard({item, onOpen}: {item: PendingApproval; onOpen: (videoId: string) => void}): JSX.Element | null {
-  const {status, accounts, refresh} = useClipUpdates()
+  const {status, accounts, profiles, refresh} = useClipUpdates()
   const [closed, setClosed] = useState(false)
   useEffect(() => {
     if (!item.answer) return
@@ -114,7 +122,7 @@ function ApprovalCard({item, onOpen}: {item: PendingApproval; onOpen: (videoId: 
     <h2 className="font-semibold">🐱 Clips Kitty · #{item.item_id}</h2>
     {item.thumbnail_url && <img className="max-h-28 rounded" src={`${API_BASE}${item.thumbnail_url}`} alt="Clip preview" />}
     <p>{item.line}</p>
-    <p className="text-xs text-muted">{item.platforms.map(platform => woopTargetLabel(platform, accounts)).join(', ')}{item.first_slot && ` · First slot: ${new Date(item.first_slot).toLocaleString()}`}</p>
+    <p className="text-xs text-muted">{item.platforms.map(platform => woopTargetLabel(platform, accounts)).join(', ')}{item.account_id ? ` · ${profiles.find(p => p.id === item.account_id)?.name ?? item.account_id}` : ''}{item.first_slot && ` · First slot: ${new Date(item.first_slot).toLocaleString()}`}</p>
     {item.answer ? <p role="status">{item.state_text || (item.answer === 'approve' ? `✅ Approved ${place}…` : `⛔ Denied ${place}. The clips stay in your library.`)}</p>
       : <ApprovalActions itemId={item.item_id} showDMCA={status?.show_dmca ?? item.show_dmca} onChanged={() => void refresh()} />}
     <button className="text-xs text-accent underline" onClick={() => onOpen(item.video_id)}>Open in editor</button>

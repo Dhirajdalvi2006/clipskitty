@@ -8,7 +8,8 @@ import {
   localZone,
   platformLabel,
   platformsFor,
-  type Provider
+  type Provider,
+  type WoopProfile
 } from '../lib/uploadpost'
 
 /** Publish a whole batch of clips to several platforms.
@@ -38,6 +39,10 @@ export default function PublishAllDialog({
   const [platforms, setPlatforms] = useState<string[]>([])
   const [discordDestination, setDiscordDestination] = useState<number | null>(null)
   const [connected, setConnected] = useState<string[]>([])
+  // Named WoopSocial profiles, loaded for the batch account picker.
+  const [accounts, setAccounts] = useState<WoopProfile[]>([])
+  // Which named key sends this batch. Empty means the Settings default.
+  const [woopAccountId, setWoopAccountId] = useState<string>('')
   // A DAILY budget, because that is the shape posting limits take: WoopSocial
   // allows five YouTube posts a day, and sending 37 at once failed 32 of them.
   // One flat interval could not say "five a day, an hour apart" at all.
@@ -89,6 +94,19 @@ export default function PublishAllDialog({
         /* not connected yet; the picker still works */
       })
   }, [])
+
+  useEffect(() => {
+    if (provider !== 'woopsocial') return
+    api
+      .woopSocialAccounts()
+      .then((got) => {
+        setAccounts(got.accounts)
+        if (!woopAccountId && got.selected_account_id) setWoopAccountId(got.selected_account_id)
+      })
+      .catch(() => {
+        /* accounts load lazily in Settings */
+      })
+  }, [provider])
 
   const toggle = (id: string): void =>
     setPlatforms((c) => (c.includes(id) ? c.filter((p) => p !== id) : [...c, id]))
@@ -159,6 +177,11 @@ export default function PublishAllDialog({
         clip_ids: sending.map((c) => c.id),
         platforms,
         ...daily,
+        // WoopSocial: which named key sends this batch. Empty means the
+        // Settings default.
+        ...(provider === 'woopsocial'
+          ? { account_id: woopAccountId || undefined }
+          : {}),
         timezone: spread ? localZone() : ''
       })
       setDone({ started: got.started.length, skipped: got.skipped })
@@ -243,6 +266,25 @@ export default function PublishAllDialog({
                 })}
               </div>
             </div>
+
+            {provider === 'woopsocial' && accounts.length > 0 && (
+              <div className="space-y-1">
+                <label className="label block mb-1">{t('Publish as')}</label>
+                <select
+                  className="input !py-1 text-sm !w-72"
+                  value={woopAccountId}
+                  onChange={(e) => setWoopAccountId(e.target.value)}
+                  aria-label={t('Which named WoopSocial key sends this batch')}
+                >
+                  <option value="">{t('Default key (Settings)')}</option>
+                  {accounts.map((p) => (
+                    <option key={p.id} value={p.id}>
+                      {p.name}{p.has_key ? ` (····${p.key_tail})` : ` ${t('no key yet')}`}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
 
             <DiscordDestinationSelect value={discordDestination} onChange={setDiscordDestination} disabled={busy} />
 

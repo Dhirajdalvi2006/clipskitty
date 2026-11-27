@@ -10,6 +10,7 @@ The API key goes through core/secrets.py, not into the settings blob.
 
 import json
 import re
+import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -17,8 +18,16 @@ from core import secrets
 from server import posts
 
 SETTINGS_KEY = "woopsocial"
-KEY_SECRET_NAME = "woopsocial_key"  # where core/secrets keeps the API key
+ACCOUNTS_KEY = "woopsocial_accounts"  # named API keys, kept in app_state
+KEY_SECRET_NAME = "woopsocial_key"  # legacy key, and the prefix for named keys
 KEY_SECRET = KEY_SECRET_NAME
+
+# Older installs have one key and one project. It becomes this profile, so an
+# upgrade needs no reconnect and every old call keeps working with no account
+# argument. New keys get their own id and their own encrypted secret file.
+DEFAULT_ACCOUNT_ID = "default"
+DEFAULT_ACCOUNT_NAME = "My WoopSocial"
+_ACCOUNT_ID_SHAPE = re.compile(r"[A-Za-z0-9_-]{1,64}")
 
 # A WoopSocial "project" is what their UI calls a Business Profile: the thing
 # connected social accounts belong to. Created on demand under this name so a
@@ -35,13 +44,16 @@ AFFILIATE_URL = "https://woopsocial.com/?via=clipskitty"
 
 DEFAULTS = {
     "enabled": False,
-    # Their project id, resolved once and remembered.
+    # Their project id, resolved once and remembered. Kept for old installs;
+    # new ones keep it on the named profile instead.
     "project_id": "",
     "platforms": [],
     "common_description": "",
     # Overrides AFFILIATE_URL above for this install only, for trying a link
     # before committing it.
     "affiliate_url": "",
+    # Which named key the Settings card manages with the old /key routes.
+    "selected_account_id": DEFAULT_ACCOUNT_ID,
 }
 
 
@@ -63,55 +75,293 @@ def is_enabled(db) -> bool:
     return bool(load_settings(db).get("enabled"))
 
 
+# ---- named WoopSocial keys -------------------------------------------------
+#
+# A profile is one API key and the WoopSocial project behind it. A creator can
+# give each one a name and publish to several of them; the id, never the key,
+# travels through the API and is written beside each post so a later status
+# check asks the right account about it.
+
+
+def _clean_account_id(value: str) -> str:
+    value = str(value or "").strip()
+    if not _ACCOUNT_ID_SHAPE.fullmatch(value):
+        return ""
+    return value
+
+
+def _clean_profile(raw) -> dict | None:
+    """Only the fields a profile may carry, with safe defaults."""
+    if not isinstance(raw, dict):
+        return None
+    account_id = _clean_account_id(raw.get("id"))
+    if not account_id:
+        return None
+    name = str(raw.get("name") or "").strip()[:80] or DEFAULT_ACCOUNT_NAME
+    platforms = raw.get("platforms")
+    return {
+        "id": account_id,
+        "name": name,
+        "project_id": str(raw.get("project_id") or ""),
+        "platforms": [str(p) for p in platforms] if isinstance(platforms, list) else [],
+    }
+
+
+def _default_profile(db) -> dict:
+    """The single key from older installs, presented as a named profile.
+
+    Its secret keeps the original file name, so upgrading never has to copy a
+    DPAPI blob or ask anyone to reconnect. The old project and platform choice
+    move across on this first read as well.
+    """
+    settings = load_settings(db)
+    return {
+        "id": DEFAULT_ACCOUNT_ID,
+        "name": DEFAULT_ACCOUNT_NAME,
+        "project_id": str(settings.get("project_id") or ""),
+        "platforms": list(settings.get("platforms") or []),
+    }
+
+
+def profiles(db) -> list[dict]:
+    try:
+        stored = json.loads(db.get_flag(ACCOUNTS_KEY, "") or "[]")
+    except (ValueError, TypeError):
+        stored = []
+    except AttributeError:
+        # A test double without the accounts flag: fall back to the default
+        # profile, which reads settings (load_settings) instead.
+        return [_default_profile(db)]
+    found = [p for raw in (stored if isinstance(stored, list) else [])
+             if (p := _clean_profile(raw)) is not None]
+    if not found:
+        found = [_default_profile(db)]
+        try:
+            db.set_flag(ACCOUNTS_KEY, json.dumps(found))
+        except AttributeError:
+            pass
+    return found
+
+
+def save_profiles(db, values: list[dict]) -> list[dict]:
+    clean = [p for raw in values if (p := _clean_profile(raw)) is not None]
+    if not clean:
+        clean = [_default_profile(db)]
+    try:
+        db.set_flag(ACCOUNTS_KEY, json.dumps(clean))
+    except AttributeError:
+        pass
+    return clean
+
+
+def _selected_id(db) -> str:
+    chosen = _clean_account_id(load_settings(db).get("selected_account_id"))
+    return chosen or DEFAULT_ACCOUNT_ID
+
+
+def selected_account_id(db) -> str:
+    """The key the Settings card currently names, for callers with no picker."""
+    return _selected_id(db)
+
+
+def refresh_account_ids(db) -> list[str]:
+    """Every row identity whose posts need following.
+
+    Rows written before keys were named carry an empty account id; requests
+    that name the default profile carry "default". Both used the original
+    single-key secret, but they are different database rows, so each needs its
+    own pass to keep a refresh from writing one post's status onto another.
+    """
+    return ["", DEFAULT_ACCOUNT_ID,
+            *[p["id"] for p in profiles(db) if p["id"] != DEFAULT_ACCOUNT_ID]]
+
+
+def get_profile(db, account_id: str | None = None) -> dict:
+    """Resolve an account id; old no-id callers get the selected profile.
+
+    An unknown or malformed id falls back rather than raising: a watch saved
+    before a profile was deleted must still find somewhere sensible to land.
+    """
+    all_profiles = profiles(db)
+    chosen = _clean_account_id(account_id) if account_id else _selected_id(db)
+    for profile in all_profiles:
+        if profile["id"] == chosen:
+            return profile
+    return all_profiles[0]
+
+
+def find_profile(db, account_id: str) -> dict | None:
+    chosen = _clean_account_id(account_id)
+    return next((p for p in profiles(db) if p["id"] == chosen), None)
+
+
+def select_profile(db, account_id: str) -> dict:
+    chosen = find_profile(db, account_id)
+    if chosen is None:
+        raise ValueError("There is no WoopSocial key with that name.")
+    save_settings(db, {"selected_account_id": chosen["id"]})
+    return chosen
+
+
+def update_profile(db, account_id: str, patch: dict) -> dict:
+    """Change one profile's own settings, leaving the others alone."""
+    chosen = find_profile(db, account_id)
+    if chosen is None:
+        raise ValueError("There is no WoopSocial key with that name.")
+    updated = [{**p, **patch} if p["id"] == chosen["id"] else p for p in profiles(db)]
+    save_profiles(db, updated)
+    return get_profile(db, chosen["id"])
+
+
+def create_profile(db, data_dir: Path, name: str, api_key: str = "") -> dict:
+    name = str(name or "").strip()[:80]
+    if not name:
+        raise ValueError("Give this key a name.")
+    profile = {
+        "id": "acc_" + uuid.uuid4().hex[:12],
+        "name": name,
+        "project_id": "",
+        "platforms": [],
+    }
+    save_profiles(db, [*profiles(db), profile])
+    select_profile(db, profile["id"])
+    if api_key:
+        save_key(data_dir, api_key, profile["id"])
+    return profile
+
+
+def rename_profile(db, account_id: str, name: str) -> dict:
+    name = str(name or "").strip()[:80]
+    if not name:
+        raise ValueError("Give this key a name.")
+    return update_profile(db, account_id, {"name": name})
+
+
+def delete_profile(db, data_dir: Path, account_id: str) -> dict:
+    profile = find_profile(db, account_id)
+    if profile is None:
+        raise ValueError("There is no WoopSocial key with that name.")
+    if profile["id"] == DEFAULT_ACCOUNT_ID:
+        # The original key has the un-suffixed secret file and is what old
+        # installs and one-argument callers use. Removing the profile would
+        # silently leave those posts with no key to check them.
+        raise ValueError("The original WoopSocial key cannot be removed.")
+    remaining = [p for p in profiles(db) if p["id"] != profile["id"]]
+    if not remaining:
+        raise ValueError("Keep at least one WoopSocial key.")
+    save_profiles(db, remaining)
+    wipe_key(data_dir, profile["id"])
+    if _selected_id(db) == profile["id"]:
+        save_settings(db, {"selected_account_id": remaining[0]["id"]})
+    return profile
+
+
+def _key_state(data_dir: Path, account_id: str) -> tuple[bool, str]:
+    """Key facts for one profile, without breaking one-argument test doubles.
+
+    The original key lives under the un-suffixed secret name, so the default
+    profile asks the original one-argument helpers. That keeps old installs and
+    callers working; named profiles get their own id.
+    """
+    if account_id == DEFAULT_ACCOUNT_ID:
+        return has_key(data_dir), key_tail(data_dir)
+    return has_key(data_dir, account_id), key_tail(data_dir, account_id)
+
+
+def profile_payload(db, data_dir: Path, profile: dict) -> dict:
+    """What the renderer may know about a named key. Never the key itself."""
+    has, tail = _key_state(data_dir, profile["id"])
+    return {
+        "id": profile["id"],
+        "name": profile["name"],
+        "project_id": profile["project_id"],
+        "has_key": has,
+        "key_tail": tail,
+        "platforms": profile["platforms"],
+    }
+
+
 # ---- the API key -----------------------------------------------------------
 
 
-def save_key(data_dir: Path, api_key: str) -> None:
-    secrets.save(Path(data_dir), KEY_SECRET, {"api_key": (api_key or "").strip()})
+def _key_secret_name(account_id: str | None) -> str:
+    """The original blob stays where it was; new keys get their own file."""
+    account_id = _clean_account_id(account_id) or DEFAULT_ACCOUNT_ID
+    if account_id == DEFAULT_ACCOUNT_ID:
+        return KEY_SECRET_NAME
+    return f"{KEY_SECRET_NAME}_{account_id}"
 
 
-def load_key(data_dir: Path) -> str:
-    got = secrets.load(Path(data_dir), KEY_SECRET) or {}
+def save_key(data_dir: Path, api_key: str, account_id: str | None = None) -> None:
+    secrets.save(
+        Path(data_dir), _key_secret_name(account_id), {"api_key": (api_key or "").strip()}
+    )
+
+
+def load_key(data_dir: Path, account_id: str | None = None) -> str:
+    got = secrets.load(Path(data_dir), _key_secret_name(account_id)) or {}
     return str(got.get("api_key") or "")
 
 
-def has_key(data_dir: Path) -> bool:
-    return bool(load_key(data_dir))
+def has_key(data_dir: Path, account_id: str | None = None) -> bool:
+    if is_legacy_account(account_id):
+        return bool(load_key(data_dir))
+    return bool(load_key(data_dir, account_id))
 
 
-def wipe_key(data_dir: Path) -> bool:
-    return secrets.wipe(Path(data_dir), KEY_SECRET)
+def wipe_key(data_dir: Path, account_id: str | None = None) -> bool:
+    return secrets.wipe(Path(data_dir), _key_secret_name(account_id))
 
 
-def key_tail(data_dir: Path) -> str:
-    key = load_key(data_dir)
+def key_tail(data_dir: Path, account_id: str | None = None) -> str:
+    if is_legacy_account(account_id):
+        key = load_key(data_dir)
+    else:
+        key = load_key(data_dir, account_id)
     return key[-4:] if len(key) > 8 else ""
 
 
-def make_client(data_dir: Path):
+def is_legacy_account(account_id: str | None) -> bool:
+    """Whether a row belongs to the original single-key secret."""
+    return not account_id or account_id == DEFAULT_ACCOUNT_ID
+
+
+def has_key_for(data_dir: Path, account_id: str | None = None) -> bool:
+    """Check a profile's key without making old one-argument callers two-arg."""
+    if is_legacy_account(account_id):
+        return has_key(data_dir)
+    return has_key(data_dir, account_id)
+
+
+def make_client(data_dir: Path, account_id: str | None = None):
     from publish.woopsocial import WoopSocialClient
 
-    return WoopSocialClient(load_key(data_dir))
+    return WoopSocialClient(load_key(data_dir, account_id))
 
 
-def resolve_project(db, client) -> str:
-    """The project id, created on first use.
+def resolve_project(db, client, account_id: str | None = None) -> str:
+    """The project id, created on first use, on the chosen named key.
 
     Their accounts hang off a project, and a creator should never be asked to
     make one — so if none is remembered, an existing one is adopted or a new
     one is created under a fixed name.
     """
-    settings = load_settings(db)
-    existing = settings.get("project_id") or ""
-    if existing:
-        return existing
+    # A caller with no account argument is an old single-key caller: even if
+    # Settings now points a picker at another profile, it must keep resolving
+    # the original key's project.
+    profile = get_profile(db, DEFAULT_ACCOUNT_ID if is_legacy_account(account_id) else account_id)
+    if profile["project_id"]:
+        return profile["project_id"]
     projects = client.projects()
     if projects:
         found = str(projects[0].get("id") or "")
     else:
         found = str((client.create_project(DEFAULT_PROJECT_NAME) or {}).get("id") or "")
     if found:
-        save_settings(db, {"project_id": found})
+        update_profile(db, profile["id"], {"project_id": found})
+        if is_legacy_account(account_id):
+            # Older installs and one-argument readers expect it in settings too.
+            save_settings(db, {"project_id": found})
     return found
 
 
@@ -137,8 +387,35 @@ def tags_of(clip) -> list[str]:
     return out
 
 
+def _account_fields(db, account_id: str, account_name: str = "") -> dict:
+    """Row identity for one post, resolved once for sends and refreshes.
+
+    An empty id is an older caller or a pre-upgrade row and keeps the old
+    behaviour: one post per clip and platform, with blank account fields.
+    """
+    if not account_id:
+        return {"account_id": "", "account_name": ""}
+    if not account_name:
+        profile = find_profile(db, account_id)
+        account_name = profile["name"] if profile else ""
+    return {"account_id": account_id, "account_name": account_name}
+
+
+def _publisher_for(db, data_dir: Path, account_id: str = ""):
+    """A publisher holding the right key and project for one named profile."""
+    from publish.woopsocial import WoopSocialPublisher
+
+    if not is_legacy_account(account_id):
+        client = make_client(data_dir, account_id)
+        return WoopSocialPublisher(client, resolve_project(db, client, account_id))
+    # The original call shape: kept for legacy rows and the single-key tests.
+    client = make_client(data_dir)
+    return WoopSocialPublisher(client, resolve_project(db, client))
+
+
 def record_outcomes(db, clip_id: int, clip, result, *, scheduled_for: str = "",
-                    caption="", visibility="") -> None:
+                    caption="", visibility="", account_id: str = "",
+                    account_name: str = "") -> None:
     """Write one row per platform for a fan-out that was just sent.
 
     Publish time only: this is what the post IS. The identity (video_id and
@@ -149,15 +426,21 @@ def record_outcomes(db, clip_id: int, clip, result, *, scheduled_for: str = "",
     provider's own site. `caption` is the text that went out and `visibility`
     the one asked for; either may be one value or {platform: value}.
 
+    `account_id` is the named key that sent it. It is part of the row's
+    identity, so two keys posting the same clip to YouTube stay two posts with
+    two independent states and links.
+
     A later status check goes through record_refresh, which learns states and
     links and leaves all of this alone. This is a send, so the row's clock
     starts again (created_at): a clip sent again to a platform is due from
     this send, not the first one.
     """
     sent = posts.sent_stamp()
+    identity = _account_fields(db, account_id, account_name)
     for outcome in result.outcomes:
         fields = {
             "provider": "woopsocial",
+            **identity,
             "created_at": sent,
             "state": outcome.state,
             "post_id": outcome.post_id,
@@ -175,7 +458,8 @@ def record_outcomes(db, clip_id: int, clip, result, *, scheduled_for: str = "",
         db.record_clip_publish(clip_id, outcome.platform, fields)
 
 
-def record_refresh(db, clip_id: int, result, *, known=None) -> int:
+def record_refresh(db, clip_id: int, result, *, known=None, account_id: str = "",
+                   account_name: str = "") -> int:
     """Write what a status check learned: state, ids, link and error only.
 
     The row's clip_id may by now be a re-rendered clip with a different
@@ -184,11 +468,26 @@ def record_refresh(db, clip_id: int, result, *, known=None) -> int:
 
     With `known`, the request's rows as stored, an outcome that only repeats
     its row is not written, nor one for a platform sent again since under a
-    newer request (server/posts.py news). Returns how many were.
+    newer request (server/posts.py news). Returns how many were. The named key
+    that made the post must be passed too, or the update would land on a
+    different row from the send it describes.
     """
+    provider = "woopsocial"
+    if known and not account_id:
+        first = known[0]
+        try:
+            account_id = str(first["account_id"] or "")
+            account_name = str(first["account_name"] or "")
+            provider = str(first["provider"] or "woopsocial")
+        except (KeyError, TypeError, IndexError):
+            # A test's stand-in row need not carry every column.
+            pass
+    identity = _account_fields(db, account_id, account_name)
     outcomes = result.outcomes if known is None else posts.news(known, result)
     for outcome in outcomes:
         db.record_clip_publish(clip_id, outcome.platform, {
+            "provider": provider,
+            **identity,
             "state": outcome.state,
             "post_id": outcome.post_id,
             "post_url": outcome.post_url,
@@ -198,7 +497,7 @@ def record_refresh(db, clip_id: int, result, *, known=None) -> int:
     return len(outcomes)
 
 
-def committed_times(db) -> list[str]:
+def committed_times(db, account_id: str = "") -> list[str]:
     """Every slot already spoken for, so a new batch queues behind them.
 
     A daily budget is per day, not per batch: without this, publishing a
@@ -209,12 +508,14 @@ def committed_times(db) -> list[str]:
     Counted: anything still queued or processing with a time on it, and
     anything published today, which has already spent part of today's
     allowance. Not counted: failures, which hold nothing, and other providers'
-    posts, which spend their own allowance rather than WoopSocial's.
+    posts, which spend their own allowance rather than WoopSocial's. With an
+    `account_id`, only that named key's posts count against its own allowance.
     """
     rows = db.conn.execute(
         "SELECT clip_id, state, scheduled_for, updated_at FROM clip_publishes "
         "WHERE state IN ('queued', 'processing', 'published', 'sending') "
-        "AND provider = 'woopsocial'"
+        "AND provider = 'woopsocial' AND (? = '' OR account_id = ?)",
+        (account_id, account_id),
     ).fetchall()
     today = datetime.now(timezone.utc).date().isoformat()
     out: list[str] = []
@@ -268,7 +569,8 @@ def first_slot_at(day_start: str, *, now: datetime | None = None) -> datetime:
 
 
 def schedule_times(db, count: int, *, per_day: int, gap_hours: float = 1,
-                   start_at: str = "", day_start: str = "") -> list[str]:
+                   start_at: str = "", day_start: str = "",
+                   account_id: str = "") -> list[str]:
     """When each of `count` posts goes out on a daily budget.
 
     One copy for the publish and for the plan shown before it, so the plan a
@@ -296,7 +598,7 @@ def schedule_times(db, count: int, *, per_day: int, gap_hours: float = 1,
     # rather than on top of it; an explicit start_at is an instruction, so it
     # still wins.
     return daily_after(
-        [] if start_at else committed_times(db),
+        [] if start_at else committed_times(db, account_id),
         int(count),
         int(per_day),
         float(gap_hours or 1),
@@ -314,17 +616,20 @@ ALIVE = ("queued", "processing", "published", "sending")
 STALE_SENDING_SECONDS = 20 * 60
 
 
-def already_sent(db, clip, platforms: list[str]) -> set[str]:
+def already_sent(db, clip, platforms: list[str], account_id: str = "") -> set[str]:
     """The platforms this clip already went to, or is on its way to.
 
     Matched on the clip's lasting identity as well as its id, because a
     re-render gives the same clip a new id. A failure or a skip holds nothing:
-    those are exactly what a retry is for."""
+    those are exactly what a retry is for. With `account_id`, only that named
+    key counts: the same clip may still be sent through a different key."""
     marks = ",".join("?" * len(ALIVE))
     rows = db.conn.execute(
         f"SELECT platform FROM clip_publishes WHERE state IN ({marks}) AND "
-        "(clip_id = ? OR (video_id != '' AND video_id = ? AND start_s = ? AND end_s = ?))",
-        (*ALIVE, clip["id"], clip["video_id"] or "", clip["start_s"], clip["end_s"]),
+        "(clip_id = ? OR (video_id != '' AND video_id = ? AND start_s = ? AND end_s = ?)) "
+        "AND (? = '' OR account_id = ?)",
+        (*ALIVE, clip["id"], clip["video_id"] or "", clip["start_s"], clip["end_s"],
+         account_id, account_id),
     ).fetchall()
     return {r["platform"] for r in rows} & set(platforms)
 
@@ -349,6 +654,8 @@ def publish_clips(
     ai_hashtags: bool = True,
     day_start: str = "",
     discord_destination_id: int | None = None,
+    account_id: str = "",
+    social_account_ids: list[str] | None = None,
 ) -> dict:
     """Publish a set of clips, optionally spaced out over time.
 
@@ -378,6 +685,11 @@ def publish_clips(
     them. `ai_hashtags=False` leaves out the ones the model chose. `day_start`
     anchors each day's posts at a local "HH:MM". All three default to exactly
     what every other caller has always had.
+
+    `account_id` names the WoopSocial key/profile to send through. Every row
+    carries it, so two keys can post the same clip to the same platform without
+    overwriting each other, and a later refresh asks the key that sent it.
+    `social_account_ids` narrows a project to particular connected channels.
     """
     from datetime import datetime, timedelta
     from datetime import timezone as tz
@@ -386,8 +698,27 @@ def publish_clips(
     from publish.errors import PublishError
     from publish.woopsocial import WoopSocialPublisher
 
-    client = make_client(data_dir)
-    publisher = WoopSocialPublisher(client, resolve_project(db, client))
+    # An empty id deliberately means the original single key. Callers with a
+    # picker (the HTTP routes, watched channels, jobs) pass the chosen profile
+    # explicitly; that keeps old one-argument callers and their test doubles
+    # working without a settings lookup here.
+    account_name = ""
+    if account_id and not is_legacy_account(account_id):
+        # A named profile: its own encrypted key and its own project memory.
+        profile = get_profile(db, account_id)
+        account_id = profile["id"]
+        account_name = profile["name"]
+        client = make_client(data_dir, account_id)
+        project = resolve_project(db, client, account_id)
+    else:
+        # The original call shape: the default/legacy key uses the un-suffixed
+        # secret and one-argument helpers, so old installs and one-argument
+        # test doubles keep working unchanged.
+        account_id = DEFAULT_ACCOUNT_ID
+        client = make_client(data_dir)
+        project = resolve_project(db, client)
+    publisher = WoopSocialPublisher(client, project)
+    identity = _account_fields(db, account_id, account_name)
     standing = (load_settings(db).get("common_description") or "").strip()
 
     start = datetime.now(tz.utc)
@@ -402,7 +733,7 @@ def publish_clips(
     # cannot express it.
     slot_times = schedule_times(
         db, len(clip_ids), per_day=per_day, gap_hours=gap_hours, start_at=start_at,
-        day_start=day_start,
+        day_start=day_start, account_id=account_id,
     )
 
     # Exceptions, keyed by clip id. JSON turns integer keys into strings on
@@ -433,7 +764,7 @@ def publish_clips(
             skipped.append({"clip_id": clip_id, "reason": "no rendered file yet"})
             continue
         if once:
-            sent = already_sent(db, clip, wanted)
+            sent = already_sent(db, clip, wanted, account_id)
             wanted = [p for p in wanted if p not in sent]
             if not wanted:
                 # Not a slot: nothing is being sent.
@@ -511,7 +842,8 @@ def publish_clips(
             for platform in wanted:
                 db.record_clip_publish(clip_id, platform, {
                     # A send: the row's clock starts again (record_outcomes).
-                    "provider": "woopsocial", "created_at": posts.sent_stamp(),
+                    "provider": "woopsocial", **identity,
+                    "created_at": posts.sent_stamp(),
                     "video_id": clip["video_id"] or "",
                     "start_s": clip["start_s"] or 0, "end_s": clip["end_s"] or 0,
                     "state": "sending", "post_id": "", "post_url": "", "error": "",
@@ -521,14 +853,21 @@ def publish_clips(
                     "caption": text, "visibility": visibility[platform],
                 })
 
-            def on_media(media_id, clip_id=clip_id, targets=tuple(wanted), uploaded=uploaded):
+            def on_media(media_id, clip_id=clip_id, targets=tuple(wanted), uploaded=uploaded,
+                         who=identity):
                 uploaded.append(media_id)
                 for platform in targets:
-                    db.record_clip_publish(clip_id, platform, {"media_id": media_id})
+                    db.record_clip_publish(clip_id, platform, {
+                        "provider": "woopsocial", **who, "media_id": media_id,
+                    })
 
         # Only a background run asks to hear about the media; a person's
-        # publish calls start() exactly as it always has.
+        # publish calls start() exactly as it always has. The same goes for an
+        # explicit social-account target: an old one-argument publisher keeps
+        # seeing only the keywords it always did.
         extra = {"on_media": on_media} if on_media is not None else {}
+        if social_account_ids:
+            extra["social_account_ids"] = social_account_ids
         try:
             result = publisher.start(
                 _Path(clip["path"]),
@@ -546,15 +885,17 @@ def publish_clips(
                 # Refused outright, or stopped before the upload landed: no
                 # post exists, so it is safe to send again.
                 for platform in wanted:
-                    db.record_clip_publish(
-                        clip_id, platform, {"state": "failed", "error": e.message[:300]}
-                    )
+                    db.record_clip_publish(clip_id, platform, {
+                        "provider": "woopsocial", **identity,
+                        "state": "failed", "error": e.message[:300],
+                    })
             # A timeout after the upload may or may not have created the post.
             # That row stays "sending" for reconcile_sending to settle.
             continue
 
         record_outcomes(db, clip_id, clip, result, scheduled_for=when, caption=text,
-                        visibility=visibility)
+                        visibility=visibility, account_id=account_id,
+                        account_name=account_name)
         if discord_destination_id is not None:
             post_links.recover(db, completed_clip=clip_id, provider="woopsocial")
         started.append(
@@ -563,7 +904,10 @@ def publish_clips(
         slot += 1
 
     if remember:
-        save_settings(db, {"platforms": platforms})
+        if account_id:
+            update_profile(db, account_id, {"platforms": platforms})
+        else:
+            save_settings(db, {"platforms": platforms})
     return {"started": started, "skipped": skipped}
 
 
@@ -584,44 +928,48 @@ def reconcile_sending(db, data_dir: Path, *, older_than: float = STALE_SENDING_S
 
     cutoff = (datetime.now() - timedelta(seconds=older_than)).isoformat(timespec="seconds")
     rows = db.conn.execute(
-        "SELECT * FROM clip_publishes WHERE state = 'sending' AND updated_at <= ? "
-        "ORDER BY clip_id",
+        "SELECT * FROM clip_publishes WHERE state = 'sending' AND provider = 'woopsocial' "
+        "AND updated_at <= ? ORDER BY clip_id",
         (cutoff,),
     ).fetchall()
     if not rows:
         return {"adopted": 0, "failed": 0}
 
-    groups: dict[tuple[int, str], list] = {}
+    groups: dict[tuple[int, str, str], list] = {}
     for row in rows:
-        groups.setdefault((int(row["clip_id"]), row["media_id"] or ""), []).append(row)
+        key = (int(row["clip_id"]), row["media_id"] or "", str(row["account_id"] or ""))
+        groups.setdefault(key, []).append(row)
 
-    publisher = None
+    publishers: dict[str, object] = {}
     adopted = failed = 0
     never_sent = "Clips Kitty stopped before this was sent. It is safe to send again."
-    for (clip_id, media_id), group in groups.items():
+    for (clip_id, media_id, account_id), group in groups.items():
         platforms = [r["platform"] for r in group]
+        identity = _account_fields(db, account_id, str(group[0]["account_name"] or ""))
         found = None
         if media_id:
             try:
-                if publisher is None:
-                    client = make_client(data_dir)
-                    publisher = WoopSocialPublisher(client, resolve_project(db, client))
-                found = publisher.find_by_media(media_id, platforms)
+                if account_id not in publishers:
+                    publishers[account_id] = _publisher_for(db, data_dir, account_id)
+                found = publishers[account_id].find_by_media(media_id, platforms)
             except PublishError:
                 continue  # unreachable now; a later refresh tries again
         if found is not None and found.outcomes:
             # The "sending" row already holds the post's identity, caption and
             # time; adopting it only learns the post's id and state.
-            record_refresh(db, clip_id, found)
+            record_refresh(db, clip_id, found, account_id=account_id)
             adopted += 1
             platforms = [p for p in platforms if p not in {o.platform for o in found.outcomes}]
         for platform in platforms:
-            db.record_clip_publish(clip_id, platform, {"state": "failed", "error": never_sent})
+            db.record_clip_publish(clip_id, platform, {
+                "provider": "woopsocial", **identity,
+                "state": "failed", "error": never_sent,
+            })
             failed += 1
     return {"adopted": adopted, "failed": failed}
 
 
-def in_flight(db, provider: str = "woopsocial") -> list[str]:
+def in_flight(db, provider: str = "woopsocial", account_id: str | None = None) -> list[str]:
     """Request ids with at least one destination still unfinished, newest first.
 
     One id per fan-out, not per row: a 37-clip batch is 37 rows but they were
@@ -629,13 +977,14 @@ def in_flight(db, provider: str = "woopsocial") -> list[str]:
     the caller asks about each once.
 
     Only this provider's: Upload-Post rows carry a request_id too, and asking
-    WoopSocial about one of those can only fail. Filtered in SQL.
+    WoopSocial about one of those can only fail. Filtered in SQL. A named
+    account narrows it further, so the worker can use that key to check them.
     """
     rows = db.conn.execute(
         "SELECT DISTINCT request_id FROM clip_publishes "
         "WHERE request_id != '' AND state IN ('queued', 'processing') AND provider = ? "
-        "ORDER BY created_at DESC",
-        (provider,),
+        "AND (? IS NULL OR account_id = ?) ORDER BY created_at DESC",
+        (provider, account_id, account_id),
     ).fetchall()
     return [r["request_id"] for r in rows]
 
@@ -644,7 +993,8 @@ def in_flight(db, provider: str = "woopsocial") -> list[str]:
 DUE_AHEAD_SECONDS = 120
 
 
-def due_in_flight(db, *, now=None, provider: str = "woopsocial") -> list[str]:
+def due_in_flight(db, *, now=None, provider: str = "woopsocial",
+                  account_id: str | None = None) -> list[str]:
     """The in-flight requests that are due, oldest-due first.
 
     A watch spreads its clips over days, so the newest requests are the ones
@@ -657,8 +1007,9 @@ def due_in_flight(db, *, now=None, provider: str = "woopsocial") -> list[str]:
     current = posts.as_utc(now)
     rows = db.conn.execute(
         "SELECT request_id, created_at, scheduled_for FROM clip_publishes "
-        "WHERE request_id != '' AND state IN ('queued', 'processing') AND provider = ?",
-        (provider,),
+        "WHERE request_id != '' AND state IN ('queued', 'processing') AND provider = ? "
+        "AND (? IS NULL OR account_id = ?)",
+        (provider, account_id, account_id),
     ).fetchall()
     earliest: dict = {}
     for row in rows:
@@ -679,7 +1030,7 @@ _last_checked: dict[str, float] = {}
 
 
 def refresh_in_flight(db, data_dir: Path, *, limit: int = 60, ids=None, now=None,
-                      last_checked: dict | None = None) -> dict:
+                      last_checked: dict | None = None, account_id: str = "") -> dict:
     """Ask WoopSocial what became of everything still in the air.
 
     Nothing did this before, so a batch stayed at "processing" forever: the
@@ -697,34 +1048,41 @@ def refresh_in_flight(db, data_dir: Path, *, limit: int = 60, ids=None, now=None
     that wants particular requests names them in `ids`.
 
     Failures are counted, not raised. A refresh is a read; one unreachable
-    request must not stop the rest being updated.
+    request must not stop the rest being updated. `account_id` checks through
+    that named key, so a post id that happens to repeat on two keys is still
+    followed with the credentials that sent it.
     """
     from publish.errors import PublishError
-    from publish.woopsocial import WoopSocialPublisher
 
     current = posts.as_utc(now)
+    checked_key = (lambda rid: f"{account_id}\0{rid}") if account_id else (lambda rid: rid)
     checked = None
     if ids is None:
         checked = _last_checked if last_checked is None else last_checked
-        due = due_in_flight(db, now=current)
-        keep = set(due)
+        due = due_in_flight(db, now=current, account_id=account_id)
+        keep = {checked_key(r) for r in due}
         for gone in [r for r in list(checked) if r not in keep]:
             checked.pop(gone, None)
         # sorted() is stable: among requests asked about equally long ago,
         # due_in_flight's oldest-due order stands.
-        ids = sorted(due, key=lambda r: checked.get(r, 0.0))
+        ids = sorted(due, key=lambda r: checked.get(checked_key(r), 0.0))
     ids = list(ids)[:limit]
     if not ids:
         return {"checked": 0, "updated": 0, "still_waiting": 0, "failed": 0}
 
-    client = make_client(data_dir)
-    publisher = WoopSocialPublisher(client, resolve_project(db, client))
+    publisher = _publisher_for(db, data_dir, account_id)
 
     updated = failed = 0
     for request_id in ids:
         if checked is not None:
-            checked[request_id] = current.timestamp()
-        rows = db.publishes_for_request(request_id)
+            checked[checked_key(request_id)] = current.timestamp()
+        # A blank id is the legacy account's own rows: one argument, as older
+        # DB doubles expose only publishes_for_request(request_id). A named
+        # key passes its id so the check reads only that key's rows.
+        if is_legacy_account(account_id):
+            rows = db.publishes_for_request(request_id)
+        else:
+            rows = db.publishes_for_request(request_id, account_id)
         if not rows:
             continue
         clip_id = int(rows[0]["clip_id"])
@@ -738,25 +1096,29 @@ def refresh_in_flight(db, data_dir: Path, *, limit: int = 60, ids=None, now=None
             continue
         # Only what changed is written: a check that repeats the rows leaves
         # updated_at alone (server/posts.py news).
-        if result.outcomes and record_refresh(db, clip_id, result, known=rows):
+        if result.outcomes and record_refresh(db, clip_id, result, known=rows,
+                                              account_id=account_id):
             updated += 1
 
     return {
         "checked": len(ids),
         "updated": updated,
-        "still_waiting": len(in_flight(db)),
+        "still_waiting": len(in_flight(db, account_id=account_id)),
         "failed": failed,
     }
 
 
-def refresh_missing_urls(db, data_dir: Path, *, now=None) -> dict:
+def refresh_missing_urls(db, data_dir: Path, *, now=None, account_id: str = "") -> dict:
     """Ask again about posts WoopSocial called published without a link, for
     a day after each one was due (server/posts.py missing_url_requests)."""
     ids = posts.missing_url_requests(db, "woopsocial", now=now)
-    return refresh_in_flight(db, data_dir, ids=ids, now=now)
+    # The same request id can be in flight under two keys; each pass asks its
+    # own key about only its own rows, including the legacy blank ones.
+    ids = [rid for rid in ids if db.publishes_for_request(rid, account_id)]
+    return refresh_in_flight(db, data_dir, ids=ids, now=now, account_id=account_id)
 
 
-def upcoming(db, *, limit: int = 200) -> list[dict]:
+def upcoming(db, *, limit: int = 200, account_id: str = "") -> list[dict]:
     """What is due, soonest first, with the clip's own title.
 
     The point of storing scheduled_for: a run spread across eight days is a
@@ -764,12 +1126,12 @@ def upcoming(db, *, limit: int = 200) -> list[dict]:
     silently dropped your posts. Which is exactly what happened.
     """
     rows = db.conn.execute(
-        "SELECT p.clip_id, p.platform, p.state, p.scheduled_for, p.post_url, "
-        "       p.error, c.title, c.hook "
+        "SELECT p.clip_id, p.platform, p.account_id, p.account_name, p.state, "
+        "       p.scheduled_for, p.post_url, p.error, c.title, c.hook "
         "FROM clip_publishes p LEFT JOIN clips c ON c.id = p.clip_id "
-        "WHERE p.scheduled_for != '' "
+        "WHERE p.scheduled_for != '' AND (? = '' OR p.account_id = ?) "
         "ORDER BY p.scheduled_for ASC LIMIT ?",
-        (int(limit),),
+        (account_id, account_id, int(limit)),
     ).fetchall()
     out = []
     for r in rows:
@@ -777,6 +1139,8 @@ def upcoming(db, *, limit: int = 200) -> list[dict]:
             {
                 "clip_id": r["clip_id"],
                 "platform": r["platform"],
+                "account_id": r["account_id"] or "",
+                "account_name": r["account_name"] or "",
                 "state": r["state"],
                 "scheduled_for": r["scheduled_for"],
                 "post_url": r["post_url"] or "",
@@ -790,12 +1154,17 @@ def upcoming(db, *, limit: int = 200) -> list[dict]:
 def status_payload(db, data_dir: Path) -> dict:
     """What the renderer is allowed to know. No key, ever."""
     settings = load_settings(db)
+    selected = get_profile(db)
+    has, tail = _key_state(data_dir, selected["id"])
     return {
         "enabled": bool(settings.get("enabled")),
-        "has_key": has_key(data_dir),
-        "key_tail": key_tail(data_dir),
-        "project_id": settings.get("project_id") or "",
-        "platforms": settings.get("platforms") or [],
+        "has_key": has,
+        "key_tail": tail,
+        "project_id": selected["project_id"],
+        "platforms": selected["platforms"],
+        "selected_account_id": selected["id"],
+        # Named keys, with just enough to tell them apart. No key material.
+        "accounts": [profile_payload(db, data_dir, p) for p in profiles(db)],
         "common_description": settings.get("common_description") or "",
         "affiliate_url": settings.get("affiliate_url") or AFFILIATE_URL,
         "storage": secrets.backend_name(),
