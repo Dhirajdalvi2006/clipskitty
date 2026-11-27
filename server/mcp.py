@@ -323,6 +323,11 @@ def _queue_video(args: dict) -> str:
             "action": "publish",
             "platforms": list(args["publish_when_done"]),
         }
+        # The job runs after the clips exist, with nobody at the keyboard: it
+        # needs the named key carried with it, or it would silently post from
+        # a different account than the one that was asked for.
+        if args.get("account_id"):
+            body["then"]["account_id"] = str(args["account_id"])
     out = _request("POST", "/jobs", body)
     if out.get("job_id") is None:
         if out.get("already_processed"):
@@ -555,6 +560,14 @@ def _woopsocial_status(_args: dict) -> str:
         return "WoopSocial is on but no API key is saved. The person adds theirs in Settings."
     platforms = status.get("platforms") or []
     last = f" Last used: {', '.join(platforms)}." if platforms else ""
+    accounts = status.get("accounts") or []
+    keys = ", ".join(
+        f"{a.get('name')} ({a.get('id')})" for a in accounts if a.get("has_key")
+    )
+    if keys:
+        last += f" Named keys: {keys}."
+        if status.get("selected_account_id"):
+            last += f" Settings default: {status['selected_account_id']}."
     return f"WoopSocial is connected.{last}"
 
 
@@ -587,6 +600,8 @@ def _schedule_clips_plan(args: dict) -> str:
     }
     if args.get("start_at"):
         body["start_at"] = args["start_at"]
+    if args.get("account_id"):
+        body["account_id"] = str(args["account_id"])
 
     out = _request("POST", "/woopsocial/batch/plan", body)
     items = out.get("items") or []
@@ -664,6 +679,8 @@ def _schedule_clips_execute(args: dict) -> str:
     }
     if args.get("start_at"):
         body["start_at"] = args["start_at"]
+    if args.get("account_id"):
+        body["account_id"] = str(args["account_id"])
     out = _request("POST", "/woopsocial/batch", body)
     started = out.get("started") or []
     skipped = out.get("skipped") or []

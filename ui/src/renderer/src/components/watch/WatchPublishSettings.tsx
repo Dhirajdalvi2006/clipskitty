@@ -2,17 +2,30 @@ import { useEffect, useRef, useState } from 'react'
 import { api, errorText } from '../../lib/api'
 import { discord, type Destination } from '../../lib/campaigns'
 import type { Watch, WatchPublish } from '../../lib/types'
-import { WOOPSOCIAL_PLATFORMS } from '../../lib/uploadpost'
+import { WOOPSOCIAL_PLATFORMS, type WoopProfile } from '../../lib/uploadpost'
 import { t } from '../../lib/i18n'
 import WatchPlatformOptions, { type PlatformOverrides } from './WatchPlatformOptions'
 import WatchSchedule, { type ScheduleValue } from './WatchSchedule'
 import { woopTargetLabel, type WoopAccount } from '../../lib/woopTargets'
 
-/** Whether WoopSocial can publish, and which accounts it has. Null while
- *  loading. Shared by the add form and each channel's settings, so both offer
- *  the same platforms. */
-export function useWoopAccounts(): { ready: boolean; connected: string[]; accounts: WoopAccount[] } | null {
-  const [woop, setWoop] = useState<{ ready: boolean; connected: string[]; accounts: WoopAccount[] } | null>(null)
+/** Whether WoopSocial can publish, its connected socials and its named
+ *  API-key profiles. Null while loading. Shared by the add form and each
+ *  channel's settings, so both offer the same platforms and the same account
+ *  picker. */
+export function useWoopAccounts(): {
+  ready: boolean
+  connected: string[]
+  accounts: WoopAccount[]
+  profiles: WoopProfile[]
+  selectedAccountId: string
+} | null {
+  const [woop, setWoop] = useState<{
+    ready: boolean
+    connected: string[]
+    accounts: WoopAccount[]
+    profiles: WoopProfile[]
+    selectedAccountId: string
+  } | null>(null)
   useEffect(() => {
     let live = true
     const load = async (): Promise<void> => {
@@ -20,9 +33,23 @@ export function useWoopAccounts(): { ready: boolean; connected: string[]; accoun
         const status = await api.woopSocialStatus()
         const ready = status.enabled && status.has_key
         const connections = ready ? await api.woopSocialConnections() : {connected: [], accounts: []}
-        if (live) setWoop({ ready, connected: connections.connected, accounts: connections.accounts ?? [] })
+        if (live)
+          setWoop({
+            ready,
+            connected: connections.connected,
+            accounts: connections.accounts ?? [],
+            profiles: status.accounts ?? [],
+            selectedAccountId: status.selected_account_id ?? 'default'
+          })
       } catch {
-        if (live) setWoop({ ready: false, connected: [], accounts: [] })
+        if (live)
+          setWoop({
+            ready: false,
+            connected: [],
+            accounts: [],
+            profiles: [],
+            selectedAccountId: 'default'
+          })
       }
     }
     void load()
@@ -79,6 +106,8 @@ export default function WatchPublishSettings({
   const [discordDestination, setDiscordDestination] = useState<number | null>(
     p.discord_destination_id ?? null
   )
+  // Which named WoopSocial key posts this channel's clips.
+  const [woopAccountId, setWoopAccountId] = useState<string>(p.woopsocial_account_id ?? '')
   const [destinations, setDestinations] = useState<Destination[]>([])
   useEffect(() => {
     let live = true
@@ -129,7 +158,8 @@ export default function WatchPublishSettings({
           ai_hashtags: aiHashtags,
           footer,
           discord_destination_id: discordDestination,
-          overrides
+          overrides,
+          woopsocial_account_id: woopAccountId
         },
         backlog,
         ...(clipWatch ? { min_views: minViews, lookback_days: lookbackDays, max_pending: maxPending } : { min_minutes: minMinutes })
@@ -147,7 +177,7 @@ export default function WatchPublishSettings({
   // Every change saves itself a moment later: one panel, no button to forget.
   // Only real changes, compared with what was last saved.
   const current = JSON.stringify([
-    mode, platforms, schedule, hashtags, aiHashtags, footer, overrides, backlog, minMinutes, minViews, lookbackDays, maxPending, discordDestination
+    mode, platforms, schedule, hashtags, aiHashtags, footer, overrides, backlog, minMinutes, minViews, lookbackDays, maxPending, discordDestination, woopAccountId
   ])
   const lastSaved = useRef(current)
   useEffect(() => {
@@ -214,6 +244,24 @@ export default function WatchPublishSettings({
           ) : (
             <div className="space-y-2">
               <p className="label">{t('Publish to')}</p>
+              {woop?.profiles.length && woop.profiles.length > 1 && (
+                <div className="space-y-1">
+                  <label className="label block text-xs mb-1">{t('Publish as')}</label>
+                  <select
+                    className="input !py-1 text-xs !w-72"
+                    value={woopAccountId}
+                    onChange={(e) => setWoopAccountId(e.target.value)}
+                    aria-label={t('Which named WoopSocial key posts this channel')}
+                  >
+                    <option value="">{t('Default key (Settings)')}</option>
+                    {woop.profiles.map((p) => (
+                      <option key={p.id} value={p.id}>
+                        {p.name}{p.has_key ? ` (····${p.key_tail})` : ` ${t('no key yet')}`}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
               {woop === null ? (
                 <p className="text-sm text-muted">{t('Loading…')}</p>
               ) : offered.length === 0 ? (

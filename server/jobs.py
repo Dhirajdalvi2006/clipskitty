@@ -632,8 +632,9 @@ class Worker(threading.Thread):
         try:
             from server import woopsocial_service as woop
 
-            if not woop.is_enabled(db) or not woop.has_key(
-                Path(self.config["paths"]["data_dir"])
+            account_id = str(then.get("account_id") or "")
+            if not woop.is_enabled(db) or not woop.has_key_for(
+                Path(self.config["paths"]["data_dir"]), account_id
             ):
                 print("  Publish skipped: WoopSocial is not set up.")
                 return
@@ -673,6 +674,8 @@ class Worker(threading.Thread):
                 # stays sent, and the publish dialog's platforms stay put.
                 once=True,
                 remember=False,
+                account_id=account_id,
+                social_account_ids=list(then.get("social_account_ids") or []),
             )
             print(
                 f"  Published {len(out['started'])}, skipped {len(out['skipped'])}."

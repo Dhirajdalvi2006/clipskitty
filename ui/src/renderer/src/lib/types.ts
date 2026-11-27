@@ -949,6 +949,9 @@ export interface WatchPublish {
   footer: string
   overrides: Record<string, Record<string, string | boolean>>
   discord_destination_id?: number | null
+  /** Which named WoopSocial API key posts this channel's clips. Empty keeps
+   *  the original single key. */
+  woopsocial_account_id: string
 }
 
 export interface Watch {

@@ -3,6 +3,7 @@ import { api } from '../lib/api'
 import { t } from '../lib/i18n'
 import { PLATFORMS, WOOPSOCIAL_PLATFORMS, platformLabel } from '../lib/uploadpost'
 import { woopTargetLabel, type WoopAccount } from '../lib/woopTargets'
+import type { WoopProfile } from '../lib/uploadpost'
 
 /** Settings for publishing through WoopSocial.
  *
@@ -34,6 +35,11 @@ type Status = {
   common_description: string
   affiliate_url: string
   storage: string
+  project_id: string
+  /** Named API-key profiles, never the key material. */
+  accounts?: WoopProfile[]
+  /** Which named key the Settings card manages. */
+  selected_account_id?: string
 }
 
 const empty: Status = {
@@ -43,7 +49,10 @@ const empty: Status = {
   platforms: [],
   common_description: '',
   affiliate_url: '',
-  storage: ''
+  storage: '',
+  project_id: '',
+  accounts: [],
+  selected_account_id: 'default'
 }
 
 export default function WoopSocialCard(): JSX.Element {
@@ -54,9 +63,19 @@ export default function WoopSocialCard(): JSX.Element {
   const [notice, setNotice] = useState('')
   const [error, setError] = useState('')
   const [connected, setConnected] = useState<string[]>([])
-  const [accounts, setAccounts] = useState<WoopAccount[]>([])
+  const [connectedAccounts, setConnectedAccounts] = useState<WoopAccount[]>([])
+  // Named API-key profiles (profiles(status.accounts)), not connected socials.
+  const [profiles, setProfiles] = useState<WoopProfile[]>([])
+  const [selectedProfileId, setSelectedProfileId] = useState('default')
   const [offered, setOffered] = useState('')
   const [affiliateDraft, setAffiliateDraft] = useState('')
+  // Adding / naming a profile.
+  const [addName, setAddName] = useState('')
+  const [addKey, setAddKey] = useState('')
+  const [adding, setAdding] = useState(false)
+  // Renaming a profile.
+  const [renameId, setRenameId] = useState<string | null>(null)
+  const [renameName, setRenameName] = useState('')
   const mounted = useRef(true)
 
   const load = (): void => {
@@ -66,6 +85,8 @@ export default function WoopSocialCard(): JSX.Element {
         if (!mounted.current) return
         setStatus(s as unknown as Status)
         setAffiliateDraft(s.affiliate_url)
+        setProfiles(s.accounts ?? [])
+        setSelectedProfileId(s.selected_account_id ?? 'default')
         // Only when it's on and has a key: asked otherwise, the engine
         // answers "not enabled", an error in the log each time Settings opens.
         if (s.enabled && s.has_key)
@@ -74,7 +95,7 @@ export default function WoopSocialCard(): JSX.Element {
             .then((got) => {
               if (!mounted.current) return
               setConnected(got.connected)
-              setAccounts(got.accounts ?? [])
+              setConnectedAccounts(got.accounts ?? [])
             })
             .catch(() => {
               /* the linked accounts show once WoopSocial answers */
@@ -110,6 +131,9 @@ export default function WoopSocialCard(): JSX.Element {
     }
   }
 
+  /** Save the key for the currently selected profile. The legacy / key
+   *  routes keep managing whichever profile Settings has selected, so an
+   *  install upgraded from a single key needs no reconnect. */
   const saveKey = async (value?: string): Promise<void> => {
     const key = (value ?? apiKey).trim()
     if (!key || busy) return
@@ -120,6 +144,8 @@ export default function WoopSocialCard(): JSX.Element {
       setStatus(got as unknown as Status)
       setApiKey('')
       setShowKey(false)
+      setProfiles(got.accounts ?? [])
+      setSelectedProfileId(got.selected_account_id ?? 'default')
       say(t('Connected.'))
       load()
     } catch (e) {
@@ -135,12 +161,119 @@ export default function WoopSocialCard(): JSX.Element {
     try {
       setStatus((await api.deleteWoopSocialKey()) as unknown as Status)
       setConnected([])
+      setProfiles([])
       say(t('API key removed.'))
     } catch (e) {
       failed(e)
     } finally {
       setBusy(false)
     }
+  }
+
+  /** Add a new named profile, optionally with its key right away. */
+  const addProfile = async (): Promise<void> => {
+    const name = addName.trim()
+    const key = addKey.trim()
+    if (!name || adding || busy) return
+    setAdding(true)
+    try {
+      const got = await api.woopSocialAddAccount({ name, api_key: key || undefined })
+      // woopSocialAddAccount returns { account: WoopProfile; projects: number }
+      const profile: WoopProfile = got.account
+      setStatus({
+        enabled: status.enabled,
+        has_key: status.has_key,
+        key_tail: status.key_tail,
+        platforms: status.platforms,
+        common_description: status.common_description,
+        affiliate_url: status.affiliate_url,
+        storage: status.storage,
+        project_id: status.project_id,
+        accounts: [...(status.accounts ?? []), profile],
+        selected_account_id: profile.id
+      } as unknown as Status)
+      setProfiles(status.accounts ? [...status.accounts, profile] : [profile])
+      setSelectedProfileId(profile.id)
+      setAddName('')
+      setAddKey('')
+      say(t('Profile added.'))
+    } catch (e) {
+      failed(e)
+    } finally {
+      setAdding(false)
+    }
+  }
+
+  const saveKeyForProfile = async (accountId: string, key: string): Promise<void> => {
+    if (!key || busy) return
+    setBusy(true)
+    try {
+      const got = await api.woopSocialPutNamedKey(accountId, key)
+      setProfiles(got.accounts ?? [])
+      say(t('Key saved.'))
+    } catch (e) {
+      failed(e)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const removeProfile = async (accountId: string): Promise<void> => {
+    if (busy) return
+    setBusy(true)
+    try {
+      const got = await api.woopSocialRemoveAccount(accountId)
+      setStatus(got as unknown as Status)
+      setProfiles(got.accounts ?? [])
+      setSelectedProfileId(got.selected_account_id ?? 'default')
+      say(t('Profile removed.'))
+    } catch (e) {
+      failed(e)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const selectProfile = async (accountId: string): Promise<void> => {
+    if (busy) return
+    setBusy(true)
+    try {
+      const got = await api.woopSocialSelectAccount(accountId)
+      setStatus(got as unknown as Status)
+      setProfiles(got.accounts ?? [])
+      setSelectedProfileId(got.selected_account_id ?? 'default')
+    } catch (e) {
+      failed(e)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const startRename = (profile: WoopProfile): void => {
+    setRenameId(profile.id)
+    setRenameName(profile.name)
+  }
+
+  const saveRename = async (): Promise<void> => {
+    if (!renameId || busy) return
+    setBusy(true)
+    try {
+      const got = await api.woopSocialRenameAccount(renameId, renameName.trim())
+      setProfiles((current) =>
+        current.map((p) => (p.id === renameId ? { ...p, name: got.name } : p))
+      )
+      setRenameId(null)
+      setRenameName('')
+    } catch (e) {
+      failed(e)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const cancelRename = (): void => {
+    setRenameId(null)
+    setRenameName('')
   }
 
   /** WoopSocial authorises one platform at a time rather than offering one
@@ -163,7 +296,7 @@ export default function WoopSocialCard(): JSX.Element {
               .then((c) => {
                 if (!mounted.current) return
                 setConnected(c.connected)
-                setAccounts(c.accounts ?? [])
+                setConnectedAccounts(c.accounts ?? [])
               })
               .catch(() => {})
           },
@@ -216,6 +349,22 @@ export default function WoopSocialCard(): JSX.Element {
 
   const affiliate = status.affiliate_url.trim()
   const mine = PLATFORMS.filter((p) => WOOPSOCIAL_PLATFORMS.includes(p.id))
+  /** The legacy single key, shown as the "default" profile so old installs
+   *  keep working with no reconnect. */
+  const defaultProfile: WoopProfile = {
+    id: 'default',
+    name: t('My WoopSocial'),
+    project_id: status.project_id ?? '',
+    has_key: status.has_key,
+    key_tail: status.key_tail,
+    platforms: status.platforms
+  }
+
+  const isDefault = (id: string) => id === 'default'
+  // Named profiles only; the original ("default") key is managed by the
+  // Default key section below so old installs keep working with no reconnect.
+  const profileList = profiles.filter((p) => p.id !== 'default')
+  const selected = profileList.find((p) => p.id === selectedProfileId) ?? defaultProfile
 
   return (
     <section className="card space-y-3" aria-label="WoopSocial publishing">
@@ -248,26 +397,86 @@ export default function WoopSocialCard(): JSX.Element {
             )}
           </p>
 
+          {/* Named API keys. Each is a full WoopSocial account with its own
+              encrypted key, so one clip can go to the same platform through
+              two different keys without one overwriting the other. */}
+          <div className="space-y-2">
+            <label className="label block">{t('API keys')}</label>
+            <div className="space-y-1">
+              {profileList.map((profile) => (
+                <ProfileRow
+                  key={profile.id}
+                  profile={profile}
+                  selected={selectedProfileId === profile.id}
+                  isDefault={isDefault(profile.id)}
+                  onSelect={selectProfile}
+                  onSaveKey={(id, key) => saveKeyForProfile(id, key)}
+                  onRemove={removeProfile}
+                  onStartRename={startRename}
+                  onSaveRename={saveRename}
+                  onCancelRename={cancelRename}
+                  renaming={renameId === profile.id}
+                  renameName={renameName}
+                  onChangeRenameName={setRenameName}
+                  busy={busy || adding}
+                />
+              ))}
+            </div>
+            <div className="flex gap-2 flex-wrap">
+              <input
+                id="woopsocial-profile-name"
+                className="input !py-1 text-sm min-w-52"
+                type="text"
+                value={addName}
+                placeholder={t('Name this key')}
+                onChange={(e) => setAddName(e.target.value)}
+                autoComplete="off"
+                spellCheck={false}
+              />
+              <input
+                id="woopsocial-profile-key"
+                className="input !py-1 text-sm min-w-52"
+                type="password"
+                value={addKey}
+                placeholder={t('Paste its WoopSocial API key (optional)')}
+                onChange={(e) => setAddKey(e.target.value)}
+                autoComplete="off"
+                spellCheck={false}
+              />
+              <button
+                className="btn-accent !py-1 !px-3 text-xs"
+                disabled={busy || adding || !addName.trim()}
+                onClick={() => void addProfile()}
+              >
+                {adding ? t('Adding…') : t('Add key')}
+              </button>
+            </div>
+          </div>
+
           <div className="space-y-2">
             <label className="label block" htmlFor="woopsocial-key">
-              {t('API key')}
+              {t('Default key (Settings)')}
             </label>
-            {status.has_key ? (
-              <div className="flex items-center gap-2 flex-wrap">
-                <span className="text-sm text-success">
-                  ● {t('Key saved')}
-                  {status.key_tail && <span className="text-muted"> ····{status.key_tail}</span>}
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="text-sm text-success">
+                ● {t('Key saved')}
+                {status.key_tail && <span className="text-muted"> ····{status.key_tail}</span>}
+                <span className="text-muted">
+                  {' · '}
+                  {t('Default: ')}
+                  {selected.name}
                 </span>
-                <button className="btn-ghost !py-1 !px-3 text-xs" onClick={() => void removeKey()}>
-                  {t('Remove')}
-                </button>
-                {status.storage && (
-                  <span className="text-[11px] text-muted">
-                    {t('Stored with')} {status.storage}
-                  </span>
-                )}
-              </div>
-            ) : (
+              </span>
+              <button className="btn-ghost !py-1 !px-3 text-xs" onClick={() => void removeKey()}>
+                {t('Remove')}
+              </button>
+              {status.storage && (
+                <span className="text-[11px] text-muted">
+                  {t('Stored with')} {status.storage}
+                </span>
+              )}
+            </div>
+            {!status.has_key && (
               <>
                 {offered && (
                   <div className="flex items-center gap-2 flex-wrap border border-accent/40 bg-accent/10 rounded-lg p-2 mb-2">
@@ -338,7 +547,7 @@ export default function WoopSocialCard(): JSX.Element {
                       title={on ? t('Connected - click to reconnect') : t('Click to connect')}
                     >
                       {on ? '● ' : '○ '}
-                      {on ? woopTargetLabel(p.id, accounts) : p.label}
+                      {on ? woopTargetLabel(p.id, connectedAccounts) : p.label}
                     </button>
                   )
                 })}
@@ -435,5 +644,156 @@ export default function WoopSocialCard(): JSX.Element {
       {notice && <p className="text-xs text-success">{notice}</p>}
       {error && <p className="text-xs text-error">{error}</p>}
     </section>
+  )
+}
+
+/** One named key row: its name, masked tail, whether it holds a key, and the
+ *  controls to select, re-key, rename or remove it. The default ("legacy")
+   *  key can't be removed — it has the un-suffixed secret old installs rely on. */
+function ProfileRow({
+  profile,
+  selected,
+  isDefault,
+  onSelect,
+  onSaveKey,
+  onRemove,
+  onStartRename,
+  onSaveRename,
+  onCancelRename,
+  renaming,
+  renameName,
+  onChangeRenameName,
+  busy
+}: {
+  profile: WoopProfile
+  selected: boolean
+  isDefault: boolean
+  onSelect: (id: string) => void
+  onSaveKey: (accountId: string, key: string) => Promise<void>
+  onRemove: (id: string) => void
+  onStartRename: (p: WoopProfile) => void
+  onSaveRename: () => void
+  onCancelRename: () => void
+  renaming: boolean
+  renameName: string
+  onChangeRenameName: (v: string) => void
+  busy: boolean
+}): JSX.Element {
+  const [key, setKey] = useState('')
+  const [showKey, setShowKey] = useState(false)
+  const [saving, setSaving] = useState(false)
+  return (
+    <div className="flex items-center gap-2 flex-wrap border border-raised rounded-lg p-2">
+      <div className="flex-1 min-w-0 flex flex-col sm:flex-row sm:items-center sm:gap-2">
+        {renaming ? (
+          <input
+            className="input !py-1 text-sm"
+            value={renameName}
+            onChange={(e) => onChangeRenameName(e.target.value)}
+            onBlur={onSaveRename}
+            onKeyDown={(e) => e.key === 'Enter' && onSaveRename()}
+            autoFocus
+          />
+        ) : (
+          <span className="text-sm font-medium truncate" title={profile.name}>
+            {profile.name}
+          </span>
+        )}
+        {profile.has_key && profile.key_tail && (
+          <span className="text-[11px] text-muted">····{profile.key_tail}</span>
+        )}
+        {!profile.has_key && (
+          <span className="text-[11px] text-warn">{t('no key yet')}</span>
+        )}
+        {selected && <span className="text-[10px] text-accent font-medium">· {t('default')}</span>}
+        {isDefault && (
+          <span className="text-[10px] text-muted">{t('original key')}</span>
+        )}
+      </div>
+      <div className="flex gap-1 shrink-0">
+        {!isDefault && (
+          <button
+            className="btn-ghost !py-1 !px-2 text-xs"
+            disabled={busy || renaming}
+            onClick={() => onSelect(profile.id)}
+            aria-pressed={selected}
+            title={selected ? t('Already the default') : t('Make this the default key')}
+          >
+            {selected ? t('Default') : t('Use')}
+          </button>
+        )}
+        {!renaming && (
+          <>
+            <button
+              className="btn-ghost !py-1 !px-2 text-xs"
+              disabled={busy}
+              onClick={() => onStartRename(profile)}
+              title={t('Rename')}
+            >
+              {t('Name')}
+            </button>
+            <button
+              className="btn-ghost !py-1 !px-2 text-xs"
+              disabled={busy || isDefault}
+              onClick={() => void onRemove(profile.id)}
+              title={t('Remove this key')}
+              aria-disabled={isDefault}
+            >
+              {t('Remove')}
+            </button>
+          </>
+        )}
+        {renaming && (
+          <>
+            <button
+              className="btn-ghost !py-1 !px-2 text-xs"
+              disabled={busy}
+              onClick={onSaveRename}
+              title={t('Save')}
+            >
+              {t('Save')}
+            </button>
+            <button
+              className="btn-ghost !py-1 !px-2 text-xs"
+              onClick={onCancelRename}
+              title={t('Cancel')}
+            >
+              {t('Cancel')}
+            </button>
+          </>
+        )}
+        {!renaming && !profile.has_key && (
+          <div className="flex gap-1">
+            <input
+              id={`woopsocial-key-${profile.id}`}
+              className="input !py-1 text-xs min-w-48"
+              type={showKey ? 'text' : 'password'}
+              value={key}
+              placeholder={t('Paste its API key')}
+              onChange={(e) => setKey(e.target.value)}
+              autoComplete="off"
+              spellCheck={false}
+            />
+            <button
+              className="btn-accent !py-1 !px-2 text-xs"
+              disabled={busy || saving || !key.trim()}
+              onClick={() => {
+                setSaving(true)
+                onSaveKey(profile.id, key).then(() => setSaving(false), () => setSaving(false))
+              }}
+              title={t('Save this key for the profile')}
+            >
+              {saving ? t('Saving…') : t('Key')}
+            </button>
+            <button
+              className="btn-ghost !py-1 !px-2 text-xs"
+              onClick={() => setShowKey((v) => !v)}
+            >
+              {showKey ? t('Hide') : t('Show')}
+            </button>
+          </div>
+        )}
+      </div>
+    </div>
   )
 }

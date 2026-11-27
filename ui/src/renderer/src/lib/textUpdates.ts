@@ -24,6 +24,8 @@ export interface PendingApproval {
   title: string
   line: string
   platforms: string[]
+  /** Named WoopSocial key this watch posts through ('' for the legacy key). */
+  account_id: string
   first_slot: string
   thumbnail_url: string
   answer: string

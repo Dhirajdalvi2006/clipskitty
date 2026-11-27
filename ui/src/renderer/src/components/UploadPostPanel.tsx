@@ -86,6 +86,11 @@ export default function UploadPostPanel({
           retry: api.retryUploadPost
         }
   const [connected, setConnected] = useState<string[]>([])
+  // Which named WoopSocial key sends this clip. Empty means the Settings
+  // default; only meaningful for the WoopSocial provider.
+  const [woopAccountId, setWoopAccountId] = useState<string>(
+    status.selected_account_id ?? ''
+  )
   const [overrides, setOverrides] = useState<Overrides>({})
   const [expanded, setExpanded] = useState<string | null>(null)
   const [when, setWhen] = useState<'now' | 'schedule' | 'queue'>('now')
@@ -125,6 +130,11 @@ export default function UploadPostPanel({
       if (timer.current) clearTimeout(timer.current)
     }
   }, [clip.id])
+
+  // Follow the Settings default when it changes while the panel is open.
+  useEffect(() => {
+    setWoopAccountId(status.selected_account_id ?? '')
+  }, [status.selected_account_id])
 
   const schedulePoll = (id: string): void => {
     if (timer.current) clearTimeout(timer.current)
@@ -206,6 +216,11 @@ export default function UploadPostPanel({
         overrides: Object.fromEntries(
           Object.entries(overrides).filter(([p]) => platforms.includes(p))
         ),
+        // WoopSocial: which named key sends this clip. Empty means the
+        // Settings default, so old behaviour is unchanged.
+        ...(provider === 'woopsocial'
+          ? { account_id: woopAccountId || undefined }
+          : {}),
         scheduled_date: when === 'schedule' ? localInputToIso(at) : '',
         timezone: when === 'schedule' ? localZone() : '',
       })
@@ -366,6 +381,28 @@ export default function UploadPostPanel({
               : t('One upload, sent to all of them.')}
         </p>
       </div>
+
+      {provider === 'woopsocial' && status.accounts && status.accounts.length > 0 && (
+        <div className="space-y-1">
+          <label className="label block mb-1" htmlFor="woopsocial-account">
+            {t('Publish as')}
+          </label>
+          <select
+            id="woopsocial-account"
+            className="input !py-1 text-sm !w-72"
+            value={woopAccountId}
+            onChange={(e) => setWoopAccountId(e.target.value)}
+            aria-label={t('Which named WoopSocial key publishes this clip')}
+          >
+            <option value="">{t('Default key (Settings)')}</option>
+            {status.accounts.map((p) => (
+              <option key={p.id} value={p.id}>
+                {p.name}{p.has_key ? ` (····${p.key_tail})` : ` ${t('no key yet')}`}
+              </option>
+            ))}
+          </select>
+        </div>
+      )}
 
       <div className="space-y-2">
         <div>
